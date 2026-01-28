@@ -1,0 +1,65 @@
+{
+  "name": "@expedient/ebot",
+  "version": "0.1.0",
+  "description": "Official TypeScript/JavaScript SDK for the ebot platform",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "require": "./dist/index.js",
+      "import": "./dist/index.mjs",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts",
+    "dev": "tsup src/index.ts --format cjs,esm --dts --watch",
+    "test": "vitest",
+    "test:coverage": "vitest --coverage",
+    "lint": "eslint src",
+    "format": "prettier --write src",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "ebot",
+    "expedient",
+    "mcp",
+    "ai",
+    "chat",
+    "api",
+    "sdk",
+    "typescript",
+    "javascript"
+  ],
+  "author": "Expedient",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/chad-atexpedient/ebot.git",
+    "directory": "sdk/typescript"
+  },
+  "bugs": {
+    "url": "https://github.com/chad-atexpedient/ebot/issues"
+  },
+  "homepage": "https://docs.expedient.cloud/ebot",
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "prettier": "^3.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^1.0.0"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
