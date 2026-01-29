@@ -8,6 +8,13 @@ import (
 	"time"
 )
 
+// Default configuration values
+const (
+	DefaultMaxEvents       = 100000           // Maximum events per slice before forced cleanup
+	DefaultRetentionPeriod = 30 * 24 * time.Hour // 30 days retention
+	DefaultCleanupInterval = 1 * time.Hour    // Cleanup check interval
+)
+
 // UsageCollector collects and tracks resource usage for cost management
 type UsageCollector interface {
 	// RecordLLMUsage records LLM API usage
@@ -24,6 +31,45 @@ type UsageCollector interface {
 
 	// GetCostReport generates a cost report
 	GetCostReport(ctx context.Context, filters UsageFilters) (*CostReport, error)
+
+	// Cleanup removes old events based on retention policy
+	Cleanup(ctx context.Context) error
+
+	// GetStats returns collector statistics
+	GetStats() CollectorStats
+
+	// Close stops background cleanup and releases resources
+	Close() error
+}
+
+// CollectorConfig configures the usage collector
+type CollectorConfig struct {
+	MaxEvents       int           // Maximum events per type before forced cleanup
+	RetentionPeriod time.Duration // How long to keep events
+	CleanupInterval time.Duration // How often to run cleanup
+	EnableAutoCleanup bool        // Whether to run background cleanup
+}
+
+// DefaultCollectorConfig returns the default configuration
+func DefaultCollectorConfig() CollectorConfig {
+	return CollectorConfig{
+		MaxEvents:       DefaultMaxEvents,
+		RetentionPeriod: DefaultRetentionPeriod,
+		CleanupInterval: DefaultCleanupInterval,
+		EnableAutoCleanup: true,
+	}
+}
+
+// CollectorStats provides statistics about the collector
+type CollectorStats struct {
+	LLMEventCount     int
+	ComputeEventCount int
+	StorageEventCount int
+	OldestEvent       time.Time
+	NewestEvent       time.Time
+	LastCleanup       time.Time
+	TotalCleanups     int64
+	EventsRemoved     int64
 }
 
 // LLMUsageEvent represents an LLM API call
@@ -181,21 +227,75 @@ type usageCollector struct {
 	computeEvents []ComputeUsageEvent
 	storageEvents []StorageUsageEvent
 	calculator    *CostCalculator
+	config        CollectorConfig
 	mu            sync.RWMutex
+
+	// Statistics
+	lastCleanup   time.Time
+	totalCleanups int64
+	eventsRemoved int64
+
+	// Background cleanup
+	stopCh chan struct{}
+	wg     sync.WaitGroup
 }
 
-// NewUsageCollector creates a new usage collector
+// NewUsageCollector creates a new usage collector with default configuration
 func NewUsageCollector() UsageCollector {
-	return &usageCollector{
-		llmEvents:     []LLMUsageEvent{},
-		computeEvents: []ComputeUsageEvent{},
-		storageEvents: []StorageUsageEvent{},
+	return NewUsageCollectorWithConfig(DefaultCollectorConfig())
+}
+
+// NewUsageCollectorWithConfig creates a new usage collector with custom configuration
+func NewUsageCollectorWithConfig(config CollectorConfig) UsageCollector {
+	c := &usageCollector{
+		llmEvents:     make([]LLMUsageEvent, 0, 1000),      // Pre-allocate with reasonable capacity
+		computeEvents: make([]ComputeUsageEvent, 0, 1000),
+		storageEvents: make([]StorageUsageEvent, 0, 1000),
 		calculator:    NewCostCalculator(),
+		config:        config,
+		stopCh:        make(chan struct{}),
 	}
+
+	// Start background cleanup if enabled
+	if config.EnableAutoCleanup && config.CleanupInterval > 0 {
+		c.wg.Add(1)
+		go c.backgroundCleanup()
+	}
+
+	return c
+}
+
+// backgroundCleanup runs periodic cleanup in the background
+func (c *usageCollector) backgroundCleanup() {
+	defer c.wg.Done()
+	
+	ticker := time.NewTicker(c.config.CleanupInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			_ = c.Cleanup(context.Background())
+		case <-c.stopCh:
+			return
+		}
+	}
+}
+
+// Close stops background cleanup and releases resources
+func (c *usageCollector) Close() error {
+	close(c.stopCh)
+	c.wg.Wait()
+	return nil
 }
 
 // RecordLLMUsage records an LLM usage event
 func (c *usageCollector) RecordLLMUsage(ctx context.Context, event LLMUsageEvent) error {
+	// Set timestamp if not provided
+	if event.Timestamp.IsZero() {
+		event.Timestamp = time.Now()
+	}
+
 	// Calculate cost if not provided
 	if event.CostUSD == 0 {
 		cost, err := c.calculator.CalculateLLMCost(event.ModelProvider, event.ModelName, event.PromptTokens, event.CompletionTokens)
@@ -206,14 +306,24 @@ func (c *usageCollector) RecordLLMUsage(ctx context.Context, event LLMUsageEvent
 	}
 
 	c.mu.Lock()
-	c.llmEvents = append(c.llmEvents, event)
-	c.mu.Unlock()
+	defer c.mu.Unlock()
 
+	// Check if we need to force cleanup due to max events
+	if len(c.llmEvents) >= c.config.MaxEvents {
+		c.cleanupLLMEventsLocked()
+	}
+
+	c.llmEvents = append(c.llmEvents, event)
 	return nil
 }
 
 // RecordComputeUsage records a compute usage event
 func (c *usageCollector) RecordComputeUsage(ctx context.Context, event ComputeUsageEvent) error {
+	// Set timestamp if not provided
+	if event.Timestamp.IsZero() {
+		event.Timestamp = time.Now()
+	}
+
 	// Calculate cost if not provided
 	if event.CostUSD == 0 {
 		cost := c.calculator.CalculateComputeCost(event.CPUSeconds, event.MemoryGBSeconds)
@@ -221,14 +331,24 @@ func (c *usageCollector) RecordComputeUsage(ctx context.Context, event ComputeUs
 	}
 
 	c.mu.Lock()
-	c.computeEvents = append(c.computeEvents, event)
-	c.mu.Unlock()
+	defer c.mu.Unlock()
 
+	// Check if we need to force cleanup due to max events
+	if len(c.computeEvents) >= c.config.MaxEvents {
+		c.cleanupComputeEventsLocked()
+	}
+
+	c.computeEvents = append(c.computeEvents, event)
 	return nil
 }
 
 // RecordStorageUsage records a storage usage event
 func (c *usageCollector) RecordStorageUsage(ctx context.Context, event StorageUsageEvent) error {
+	// Set timestamp if not provided
+	if event.Timestamp.IsZero() {
+		event.Timestamp = time.Now()
+	}
+
 	// Calculate cost if not provided
 	if event.CostUSD == 0 {
 		cost := c.calculator.CalculateStorageCost(event.Bytes)
@@ -236,10 +356,146 @@ func (c *usageCollector) RecordStorageUsage(ctx context.Context, event StorageUs
 	}
 
 	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Check if we need to force cleanup due to max events
+	if len(c.storageEvents) >= c.config.MaxEvents {
+		c.cleanupStorageEventsLocked()
+	}
+
 	c.storageEvents = append(c.storageEvents, event)
-	c.mu.Unlock()
+	return nil
+}
+
+// Cleanup removes old events based on retention policy
+func (c *usageCollector) Cleanup(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.cleanupLLMEventsLocked()
+	c.cleanupComputeEventsLocked()
+	c.cleanupStorageEventsLocked()
+
+	c.lastCleanup = time.Now()
+	c.totalCleanups++
 
 	return nil
+}
+
+// cleanupLLMEventsLocked removes old LLM events (must be called with lock held)
+func (c *usageCollector) cleanupLLMEventsLocked() {
+	if len(c.llmEvents) == 0 {
+		return
+	}
+
+	cutoff := time.Now().Add(-c.config.RetentionPeriod)
+	originalLen := len(c.llmEvents)
+
+	// Filter events to keep only those within retention period
+	filtered := make([]LLMUsageEvent, 0, len(c.llmEvents)/2)
+	for _, event := range c.llmEvents {
+		if event.Timestamp.After(cutoff) {
+			filtered = append(filtered, event)
+		}
+	}
+
+	c.llmEvents = filtered
+	removed := originalLen - len(filtered)
+	c.eventsRemoved += int64(removed)
+}
+
+// cleanupComputeEventsLocked removes old compute events (must be called with lock held)
+func (c *usageCollector) cleanupComputeEventsLocked() {
+	if len(c.computeEvents) == 0 {
+		return
+	}
+
+	cutoff := time.Now().Add(-c.config.RetentionPeriod)
+	originalLen := len(c.computeEvents)
+
+	// Filter events to keep only those within retention period
+	filtered := make([]ComputeUsageEvent, 0, len(c.computeEvents)/2)
+	for _, event := range c.computeEvents {
+		if event.Timestamp.After(cutoff) {
+			filtered = append(filtered, event)
+		}
+	}
+
+	c.computeEvents = filtered
+	removed := originalLen - len(filtered)
+	c.eventsRemoved += int64(removed)
+}
+
+// cleanupStorageEventsLocked removes old storage events (must be called with lock held)
+func (c *usageCollector) cleanupStorageEventsLocked() {
+	if len(c.storageEvents) == 0 {
+		return
+	}
+
+	cutoff := time.Now().Add(-c.config.RetentionPeriod)
+	originalLen := len(c.storageEvents)
+
+	// Filter events to keep only those within retention period
+	filtered := make([]StorageUsageEvent, 0, len(c.storageEvents)/2)
+	for _, event := range c.storageEvents {
+		if event.Timestamp.After(cutoff) {
+			filtered = append(filtered, event)
+		}
+	}
+
+	c.storageEvents = filtered
+	removed := originalLen - len(filtered)
+	c.eventsRemoved += int64(removed)
+}
+
+// GetStats returns collector statistics
+func (c *usageCollector) GetStats() CollectorStats {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	stats := CollectorStats{
+		LLMEventCount:     len(c.llmEvents),
+		ComputeEventCount: len(c.computeEvents),
+		StorageEventCount: len(c.storageEvents),
+		LastCleanup:       c.lastCleanup,
+		TotalCleanups:     c.totalCleanups,
+		EventsRemoved:     c.eventsRemoved,
+	}
+
+	// Find oldest and newest events
+	var oldest, newest time.Time
+
+	for _, e := range c.llmEvents {
+		if oldest.IsZero() || e.Timestamp.Before(oldest) {
+			oldest = e.Timestamp
+		}
+		if newest.IsZero() || e.Timestamp.After(newest) {
+			newest = e.Timestamp
+		}
+	}
+
+	for _, e := range c.computeEvents {
+		if oldest.IsZero() || e.Timestamp.Before(oldest) {
+			oldest = e.Timestamp
+		}
+		if newest.IsZero() || e.Timestamp.After(newest) {
+			newest = e.Timestamp
+		}
+	}
+
+	for _, e := range c.storageEvents {
+		if oldest.IsZero() || e.Timestamp.Before(oldest) {
+			oldest = e.Timestamp
+		}
+		if newest.IsZero() || e.Timestamp.After(newest) {
+			newest = e.Timestamp
+		}
+	}
+
+	stats.OldestEvent = oldest
+	stats.NewestEvent = newest
+
+	return stats
 }
 
 // GetUsageReport generates a usage report
@@ -337,7 +593,8 @@ func (c *usageCollector) GetCostReport(ctx context.Context, filters UsageFilters
 		CostByWorkspace: make(map[string]float64),
 	}
 
-	// Calculate costs by category
+	// Calculate costs by category (use read lock for iteration)
+	c.mu.RLock()
 	report.CostByCategory["LLM"] = 0
 	report.CostByCategory["Compute"] = 0
 	report.CostByCategory["Storage"] = 0
@@ -359,6 +616,7 @@ func (c *usageCollector) GetCostReport(ctx context.Context, filters UsageFilters
 			report.CostByCategory["Storage"] += event.CostUSD
 		}
 	}
+	c.mu.RUnlock()
 
 	// Aggregate by user and workspace
 	for userID, usage := range usageReport.ByUser {
