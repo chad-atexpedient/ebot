@@ -1,0 +1,133 @@
+# ArgoCD Application for ebot
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: ebot
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  
+  source:
+    repoURL: https://github.com/chad-atexpedient/ebot
+    targetRevision: main
+    path: chart
+    helm:
+      releaseName: ebot
+      values: |
+        replicaCount: 3
+        
+        image:
+          repository: ghcr.io/chad-atexpedient/ebot
+          tag: latest
+          pullPolicy: IfNotPresent
+        
+        env:
+          - name: OPENAI_API_KEY
+            valueFrom:
+              secretKeyRef:
+                name: ebot-secrets
+                key: openai-api-key
+          - name: ANTHROPIC_API_KEY
+            valueFrom:
+              secretKeyRef:
+                name: ebot-secrets
+                key: anthropic-api-key
+        
+        postgresql:
+          enabled: true
+          auth:
+            username: ebot
+            database: ebot
+          primary:
+            persistence:
+              size: 100Gi
+        
+        redis:
+          enabled: true
+          master:
+            persistence:
+              size: 10Gi
+        
+        ingress:
+          enabled: true
+          className: nginx
+          annotations:
+            cert-manager.io/cluster-issuer: letsencrypt-prod
+          hosts:
+            - host: ebot.expedient.cloud
+              paths:
+                - path: /
+                  pathType: Prefix
+          tls:
+            - secretName: ebot-tls
+              hosts:
+                - ebot.expedient.cloud
+        
+        resources:
+          limits:
+            cpu: 2000m
+            memory: 4Gi
+          requests:
+            cpu: 1000m
+            memory: 2Gi
+        
+        autoscaling:
+          enabled: true
+          minReplicas: 3
+          maxReplicas: 10
+          targetCPUUtilizationPercentage: 70
+          targetMemoryUtilizationPercentage: 80
+  
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: ebot
+  
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+  
+  revisionHistoryLimit: 10
+---
+# AppProject for ebot
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: ebot
+  namespace: argocd
+spec:
+  description: ebot Platform Project
+  
+  sourceRepos:
+    - 'https://github.com/chad-atexpedient/ebot'
+  
+  destinations:
+    - namespace: ebot
+      server: https://kubernetes.default.svc
+    - namespace: ebot-*
+      server: https://kubernetes.default.svc
+  
+  clusterResourceWhitelist:
+    - group: ''
+      kind: Namespace
+    - group: 'rbac.authorization.k8s.io'
+      kind: ClusterRole
+    - group: 'rbac.authorization.k8s.io'
+      kind: ClusterRoleBinding
+  
+  namespaceResourceWhitelist:
+    - group: '*'
+      kind: '*'
