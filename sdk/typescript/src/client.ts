@@ -1,169 +1,257 @@
 /**
- * ebot TypeScript SDK
- * 
- * Official TypeScript/JavaScript client for the ebot platform.
- * Works in Node.js, browsers, and edge runtimes.
+ * ebot TypeScript SDK Client
+ * @packageDocumentation
  */
 
-import {
-  MCPServers,
-  Threads,
-  Agents,
-  Workspaces,
-  Quotas,
-  Costs,
-  Regions,
-  AccessControl,
-} from './resources';
-import { EbotError, AuthenticationError, QuotaExceededError, ResourceNotFoundError } from './errors';
+import { EbotError, AuthenticationError, RateLimitError, ValidationError, NetworkError, ServerError } from './errors';
+import type { RequestOptions, ClientConfig, RetryConfig } from './types';
 
-export interface EbotClientConfig {
-  /** Your ebot API key */
-  apiKey: string;
-  /** Base URL for the ebot API */
-  baseUrl?: string;
-  /** Request timeout in milliseconds */
-  timeout?: number;
-  /** Custom fetch implementation */
-  fetch?: typeof fetch;
-}
+/**
+ * Default retry configuration
+ */
+const DEFAULT_RETRY_CONFIG: RetryConfig = {
+  maxRetries: 3,
+  baseDelay: 1000,
+  maxDelay: 30000,
+  retryableStatusCodes: [429, 500, 502, 503, 504],
+};
 
+/**
+ * Default client configuration
+ */
+const DEFAULT_CONFIG: Partial<ClientConfig> = {
+  baseUrl: 'https://api.expedient.cloud',
+  timeout: 30000,
+  retryConfig: DEFAULT_RETRY_CONFIG,
+};
+
+/**
+ * HTTP client for ebot API with retry logic and error handling
+ */
 export class EbotClient {
   private apiKey: string;
   private baseUrl: string;
   private timeout: number;
-  private fetchImpl: typeof fetch;
+  private retryConfig: RetryConfig;
+  private tenantId?: string;
+  private headers: Record<string, string>;
 
-  // Resource managers
-  public readonly mcpServers: MCPServers;
-  public readonly threads: Threads;
-  public readonly agents: Agents;
-  public readonly workspaces: Workspaces;
-  public readonly quotas: Quotas;
-  public readonly costs: Costs;
-  public readonly regions: Regions;
-  public readonly accessControl: AccessControl;
-
-  constructor(config: EbotClientConfig) {
-    this.apiKey = config.apiKey;
-    this.baseUrl = (config.baseUrl || 'https://api.expedient.cloud').replace(/\/$/, '');
-    this.timeout = config.timeout || 30000;
-    this.fetchImpl = config.fetch || globalThis.fetch;
-
-    if (!this.apiKey) {
+  constructor(config: ClientConfig) {
+    if (!config.apiKey) {
       throw new Error('API key is required');
     }
 
-    // Initialize resource managers
-    this.mcpServers = new MCPServers(this);
-    this.threads = new Threads(this);
-    this.agents = new Agents(this);
-    this.workspaces = new Workspaces(this);
-    this.quotas = new Quotas(this);
-    this.costs = new Costs(this);
-    this.regions = new Regions(this);
-    this.accessControl = new AccessControl(this);
+    this.apiKey = config.apiKey;
+    this.baseUrl = config.baseUrl || DEFAULT_CONFIG.baseUrl!;
+    this.timeout = config.timeout || DEFAULT_CONFIG.timeout!;
+    this.retryConfig = { ...DEFAULT_RETRY_CONFIG, ...config.retryConfig };
+    this.tenantId = config.tenantId;
+    this.headers = {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${this.apiKey}`,
+      'User-Agent': 'ebot-sdk-typescript/1.0.0',
+      ...config.headers,
+    };
+
+    if (this.tenantId) {
+      this.headers['X-Tenant-ID'] = this.tenantId;
+    }
   }
 
   /**
-   * Make an HTTP request to the ebot API.
+   * Make an HTTP request with retry logic
    */
-  async request<T = any>(
+  async request<T>(
     method: string,
     path: string,
-    options: {
-      params?: Record<string, string>;
-      body?: any;
-      headers?: Record<string, string>;
-    } = {}
+    options: RequestOptions = {}
   ): Promise<T> {
-    const url = new URL(path, this.baseUrl);
-    
-    // Add query parameters
-    if (options.params) {
-      Object.entries(options.params).forEach(([key, value]) => {
-        url.searchParams.append(key, value);
-      });
+    const url = `${this.baseUrl}${path}`;
+    let lastError: Error | null = null;
+
+    for (let attempt = 0; attempt <= this.retryConfig.maxRetries; attempt++) {
+      try {
+        const response = await this.makeRequest(method, url, options);
+        return await this.handleResponse<T>(response);
+      } catch (error) {
+        lastError = error as Error;
+
+        if (!this.shouldRetry(error as Error, attempt)) {
+          throw error;
+        }
+
+        const delay = this.calculateDelay(attempt);
+        await this.sleep(delay);
+      }
     }
 
-    // Build headers
-    const headers: Record<string, string> = {
-      'Authorization': `Bearer ${this.apiKey}`,
-      'Content-Type': 'application/json',
-      'User-Agent': 'ebot-typescript-sdk/0.1.0',
-      ...options.headers,
-    };
+    throw lastError;
+  }
 
-    // Build request options
-    const requestOptions: RequestInit = {
-      method,
-      headers,
-      signal: AbortSignal.timeout(this.timeout),
-    };
-
-    // Add body for POST/PUT/PATCH
-    if (options.body && ['POST', 'PUT', 'PATCH'].includes(method.toUpperCase())) {
-      requestOptions.body = JSON.stringify(options.body);
-    }
+  /**
+   * Make the actual HTTP request
+   */
+  private async makeRequest(
+    method: string,
+    url: string,
+    options: RequestOptions
+  ): Promise<Response> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
 
     try {
-      const response = await this.fetchImpl(url.toString(), requestOptions);
+      const fetchOptions: RequestInit = {
+        method,
+        headers: { ...this.headers, ...options.headers },
+        signal: controller.signal,
+      };
 
-      // Handle error responses
-      if (response.status === 401) {
-        throw new AuthenticationError('Invalid API key');
-      } else if (response.status === 429) {
-        throw new QuotaExceededError('Quota exceeded');
-      } else if (response.status === 404) {
-        throw new ResourceNotFoundError(`Resource not found: ${path}`);
-      } else if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new EbotError(
-          `API error: ${response.status}`,
-          response.status,
-          errorData
-        );
+      if (options.body) {
+        fetchOptions.body = JSON.stringify(options.body);
       }
 
-      // Parse and return JSON
-      if (response.headers.get('content-type')?.includes('application/json')) {
-        return await response.json();
+      if (options.params) {
+        const searchParams = new URLSearchParams();
+        for (const [key, value] of Object.entries(options.params)) {
+          if (value !== undefined && value !== null) {
+            searchParams.append(key, String(value));
+          }
+        }
+        const queryString = searchParams.toString();
+        if (queryString) {
+          url = `${url}?${queryString}`;
+        }
       }
 
-      return null as T;
-    } catch (error) {
-      if (error instanceof EbotError) {
-        throw error;
-      }
-      throw new EbotError(`Request failed: ${(error as Error).message}`);
+      return await fetch(url, fetchOptions);
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
+
+  /**
+   * Handle the HTTP response
+   */
+  private async handleResponse<T>(response: Response): Promise<T> {
+    if (response.ok) {
+      if (response.status === 204) {
+        return undefined as T;
+      }
+      return response.json() as Promise<T>;
+    }
+
+    // Handle error responses
+    let errorData: any;
+    try {
+      errorData = await response.json();
+    } catch {
+      errorData = { message: response.statusText };
+    }
+
+    const message = errorData.message || `HTTP ${response.status}`;
+    const requestId = errorData.requestId;
+
+    switch (response.status) {
+      case 401:
+        throw new AuthenticationError(message, response.status, errorData, requestId);
+      case 429:
+        const retryAfter = parseInt(response.headers.get('Retry-After') || '60', 10);
+        throw new RateLimitError(message, response.status, errorData, requestId, retryAfter);
+      case 400:
+      case 422:
+        throw new ValidationError(message, response.status, errorData, requestId, errorData.errors);
+      case 500:
+      case 502:
+      case 503:
+      case 504:
+        throw new ServerError(message, response.status, errorData, requestId);
+      default:
+        throw new EbotError(message, response.status, errorData, requestId);
+    }
+  }
+
+  /**
+   * Determine if the request should be retried
+   */
+  private shouldRetry(error: Error, attempt: number): boolean {
+    if (attempt >= this.retryConfig.maxRetries) {
+      return false;
+    }
+
+    if (error instanceof RateLimitError) {
+      return true;
+    }
+
+    if (error instanceof ServerError) {
+      return true;
+    }
+
+    if (error instanceof NetworkError) {
+      return true;
+    }
+
+    if (error.name === 'AbortError') {
+      return true; // Timeout, can retry
+    }
+
+    return false;
+  }
+
+  /**
+   * Calculate delay for retry with exponential backoff and jitter
+   */
+  private calculateDelay(attempt: number): number {
+    const exponentialDelay = this.retryConfig.baseDelay * Math.pow(2, attempt);
+    const cappedDelay = Math.min(exponentialDelay, this.retryConfig.maxDelay);
+    
+    // Add jitter (±25%)
+    const jitter = cappedDelay * 0.25 * (Math.random() * 2 - 1);
+    return Math.floor(cappedDelay + jitter);
+  }
+
+  /**
+   * Sleep for a specified duration
+   */
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  // Convenience methods
 
   /**
    * GET request
    */
-  async get<T = any>(path: string, params?: Record<string, string>): Promise<T> {
-    return this.request<T>('GET', path, { params });
+  async get<T>(path: string, options?: RequestOptions): Promise<T> {
+    return this.request<T>('GET', path, options);
   }
 
   /**
    * POST request
    */
-  async post<T = any>(path: string, body?: any): Promise<T> {
-    return this.request<T>('POST', path, { body });
+  async post<T>(path: string, body?: any, options?: RequestOptions): Promise<T> {
+    return this.request<T>('POST', path, { ...options, body });
   }
 
   /**
    * PUT request
    */
-  async put<T = any>(path: string, body?: any): Promise<T> {
-    return this.request<T>('PUT', path, { body });
+  async put<T>(path: string, body?: any, options?: RequestOptions): Promise<T> {
+    return this.request<T>('PUT', path, { ...options, body });
+  }
+
+  /**
+   * PATCH request
+   */
+  async patch<T>(path: string, body?: any, options?: RequestOptions): Promise<T> {
+    return this.request<T>('PATCH', path, { ...options, body });
   }
 
   /**
    * DELETE request
    */
-  async delete<T = any>(path: string): Promise<T> {
-    return this.request<T>('DELETE', path);
+  async delete<T>(path: string, options?: RequestOptions): Promise<T> {
+    return this.request<T>('DELETE', path, options);
   }
 }
+
+export default EbotClient;
