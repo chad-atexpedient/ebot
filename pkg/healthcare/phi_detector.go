@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +34,7 @@ const (
 	PHITypeAddress             PHIType = "address"
 	PHITypeDiagnosisCode       PHIType = "diagnosis_code"
 	PHITypeProcedureCode       PHIType = "procedure_code"
+	PHITypeAge                 PHIType = "age"
 )
 
 // PHILocation represents where PHI was found in the text
@@ -47,14 +49,14 @@ type PHILocation struct {
 
 // PHIReport contains detection results
 type PHIReport struct {
-	ContainsPHI    bool          `json:"contains_phi"`
-	PHITypes       []PHIType     `json:"phi_types"`
-	Locations      []PHILocation `json:"locations"`
-	RiskLevel      RiskLevel     `json:"risk_level"`
-	DetectionTime  time.Duration `json:"detection_time"`
-	RedactedText   string        `json:"redacted_text,omitempty"`
-	TotalPHICount  int           `json:"total_phi_count"`
-	HighRiskCount  int           `json:"high_risk_count"`
+	ContainsPHI   bool          `json:"contains_phi"`
+	PHITypes      []PHIType     `json:"phi_types"`
+	Locations     []PHILocation `json:"locations"`
+	RiskLevel     RiskLevel     `json:"risk_level"`
+	DetectionTime time.Duration `json:"detection_time"`
+	RedactedText  string        `json:"redacted_text,omitempty"`
+	TotalPHICount int           `json:"total_phi_count"`
+	HighRiskCount int           `json:"high_risk_count"`
 }
 
 // RiskLevel indicates the severity of PHI exposure
@@ -72,10 +74,10 @@ const (
 type PHIDetector interface {
 	// ScanForPHI scans text for PHI
 	ScanForPHI(ctx context.Context, text string) (*PHIReport, error)
-	
+
 	// RedactPHI redacts PHI from text
 	RedactPHI(ctx context.Context, text string) (string, error)
-	
+
 	// ValidateHIPAACompliance checks if text is HIPAA compliant
 	ValidateHIPAACompliance(ctx context.Context, text string) (bool, []string, error)
 }
@@ -91,10 +93,10 @@ func NewPHIDetector() PHIDetector {
 	d := &phiDetectorImpl{
 		patterns: make(map[PHIType]*regexp.Regexp),
 	}
-	
+
 	// Initialize regex patterns for each PHI type
 	d.initializePatterns()
-	
+
 	return d
 }
 
@@ -103,42 +105,32 @@ func (d *phiDetectorImpl) initializePatterns() {
 	d.patterns[PHITypeSSN] = regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b|\b\d{9}\b`)
 	d.patterns[PHITypeEmail] = regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b`)
 	d.patterns[PHITypePhoneNumber] = regexp.MustCompile(`\b\d{3}[-.]?\d{3}[-.]?\d{4}\b|\(\d{3}\)\s*\d{3}[-.]?\d{4}`)
-	d.patterns[PHITypeFaxNumber] = regexp.MustCompile(`\bfax:?\s*\d{3}[-.]?\d{3}[-.]?\d{4}\b`)
+	d.patterns[PHITypeFaxNumber] = regexp.MustCompile(`(?i)\bfax:?\s*\d{3}[-.]?\d{3}[-.]?\d{4}\b`)
 	d.patterns[PHITypeDateOfBirth] = regexp.MustCompile(`\b(0[1-9]|1[0-2])/(0[1-9]|[12][0-9]|3[01])/(19|20)\d{2}\b`)
-	d.patterns[PHITypeMedicalRecordNumber] = regexp.MustCompile(`\bMRN:?\s*[A-Z0-9]{6,12}\b|\bmedical\s+record\s+#?\s*[A-Z0-9]{6,12}\b`)
-	d.patterns[PHITypeHealthPlanNumber] = regexp.MustCompile(`\b(health\s+plan|insurance)\s+#?\s*[A-Z0-9]{6,15}\b`)
+	d.patterns[PHITypeMedicalRecordNumber] = regexp.MustCompile(`(?i)\bMRN:?\s*[A-Z0-9]{6,12}\b|\bmedical\s+record\s+#?\s*[A-Z0-9]{6,12}\b`)
+	d.patterns[PHITypeHealthPlanNumber] = regexp.MustCompile(`(?i)\b(health\s+plan|insurance)\s+#?\s*[A-Z0-9]{6,15}\b`)
 	d.patterns[PHITypeIPAddress] = regexp.MustCompile(`\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b`)
-	d.patterns[PHITypeDiagnosisCode] = regexp.MustCompile(`\b(ICD-10|ICD-9):?\s*[A-Z0-9.]{3,7}\b`)
-	d.patterns[PHITypeProcedureCode] = regexp.MustCompile(`\b(CPT|HCPCS):?\s*[0-9]{4,5}[A-Z]?\b`)
-	
+	d.patterns[PHITypeDiagnosisCode] = regexp.MustCompile(`(?i)\b(ICD-10|ICD-9):?\s*[A-Z0-9.]{3,7}\b`)
+	d.patterns[PHITypeProcedureCode] = regexp.MustCompile(`(?i)\b(CPT|HCPCS):?\s*[0-9]{4,5}[A-Z]?\b`)
+
 	// Address pattern (simplified)
-	d.patterns[PHITypeAddress] = regexp.MustCompile(`\b\d+\s+[A-Z][a-z]+\s+(Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct)\b`)
-	
+	d.patterns[PHITypeAddress] = regexp.MustCompile(`(?i)\b\d+\s+[A-Z][a-z]+\s+(Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct)\b`)
+
 	// Name pattern (simplified - looks for Title + Name patterns)
 	d.patterns[PHITypeName] = regexp.MustCompile(`\b(Mr|Mrs|Ms|Dr|Prof)\.?\s+[A-Z][a-z]+\s+[A-Z][a-z]+\b`)
 }
 
-// ScanForPHI scans text for PHI
-func (d *phiDetectorImpl) ScanForPHI(ctx context.Context, text string) (*PHIReport, error) {
-	startTime := time.Now()
-	
-	report := &PHIReport{
-		ContainsPHI:   false,
-		PHITypes:      []PHIType{},
-		Locations:     []PHILocation{},
-		RiskLevel:     RiskLevelNone,
-		TotalPHICount: 0,
-	}
-	
+// scanInternal performs the actual PHI scanning without generating redacted text.
+// This is the core scanning logic that avoids recursion by not calling RedactPHI.
+func (d *phiDetectorImpl) scanInternal(text string) []PHILocation {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	
-	// Scan for each PHI type
-	seenTypes := make(map[PHIType]bool)
-	
+
+	var locations []PHILocation
+
 	for phiType, pattern := range d.patterns {
 		matches := pattern.FindAllStringIndex(text, -1)
-		
+
 		for _, match := range matches {
 			location := PHILocation{
 				Start:  match[0],
@@ -148,73 +140,92 @@ func (d *phiDetectorImpl) ScanForPHI(ctx context.Context, text string) (*PHIRepo
 				Score:  d.calculateConfidenceScore(phiType, text[match[0]:match[1]]),
 				Reason: fmt.Sprintf("Matched pattern for %s", phiType),
 			}
-			
-			report.Locations = append(report.Locations, location)
-			report.TotalPHICount++
-			
-			if !seenTypes[phiType] {
-				report.PHITypes = append(report.PHITypes, phiType)
-				seenTypes[phiType] = true
-			}
-			
-			// Count high-risk PHI
-			if d.isHighRiskPHI(phiType) {
-				report.HighRiskCount++
-			}
+			locations = append(locations, location)
 		}
 	}
-	
-	// Determine if PHI was found
-	report.ContainsPHI = len(report.Locations) > 0
-	
-	// Calculate risk level
-	report.RiskLevel = d.calculateRiskLevel(report)
-	
-	// Generate redacted text
-	if report.ContainsPHI {
-		redacted, err := d.RedactPHI(ctx, text)
-		if err == nil {
-			report.RedactedText = redacted
-		}
-	}
-	
-	report.DetectionTime = time.Since(startTime)
-	
-	return report, nil
+
+	return locations
 }
 
-// RedactPHI redacts PHI from text
-func (d *phiDetectorImpl) RedactPHI(ctx context.Context, text string) (string, error) {
-	report, err := d.ScanForPHI(ctx, text)
-	if err != nil {
-		return "", err
+// applyRedactions applies redactions to text based on PHI locations.
+// Locations are sorted in descending order by start position to avoid offset issues.
+func (d *phiDetectorImpl) applyRedactions(text string, locations []PHILocation) string {
+	if len(locations) == 0 {
+		return text
 	}
-	
-	if !report.ContainsPHI {
-		return text, nil
-	}
-	
-	// Sort locations by start position (descending) to avoid offset issues
-	locations := make([]PHILocation, len(report.Locations))
-	copy(locations, report.Locations)
-	
-	// Sort in reverse order
-	for i := 0; i < len(locations); i++ {
-		for j := i + 1; j < len(locations); j++ {
-			if locations[i].Start < locations[j].Start {
-				locations[i], locations[j] = locations[j], locations[i]
-			}
-		}
-	}
-	
-	// Redact from end to start
+
+	// Create a copy to avoid modifying the original slice
+	sortedLocations := make([]PHILocation, len(locations))
+	copy(sortedLocations, locations)
+
+	// Sort by start position descending using sort.Slice (O(n log n))
+	sort.Slice(sortedLocations, func(i, j int) bool {
+		return sortedLocations[i].Start > sortedLocations[j].Start
+	})
+
+	// Redact from end to start to avoid offset issues
 	redacted := text
-	for _, location := range locations {
+	for _, location := range sortedLocations {
 		redactionText := d.getRedactionText(location.Type)
 		redacted = redacted[:location.Start] + redactionText + redacted[location.End:]
 	}
-	
-	return redacted, nil
+
+	return redacted
+}
+
+// ScanForPHI scans text for PHI and returns a comprehensive report.
+// This method is safe from recursion as it uses scanInternal and applyRedactions.
+func (d *phiDetectorImpl) ScanForPHI(ctx context.Context, text string) (*PHIReport, error) {
+	startTime := time.Now()
+
+	// Use internal scan to avoid recursion
+	locations := d.scanInternal(text)
+
+	report := &PHIReport{
+		ContainsPHI:   len(locations) > 0,
+		PHITypes:      []PHIType{},
+		Locations:     locations,
+		RiskLevel:     RiskLevelNone,
+		TotalPHICount: len(locations),
+	}
+
+	// Build PHI types list and count high-risk items
+	seenTypes := make(map[PHIType]bool)
+	for _, loc := range locations {
+		if !seenTypes[loc.Type] {
+			report.PHITypes = append(report.PHITypes, loc.Type)
+			seenTypes[loc.Type] = true
+		}
+
+		if d.isHighRiskPHI(loc.Type) {
+			report.HighRiskCount++
+		}
+	}
+
+	// Calculate risk level
+	report.RiskLevel = d.calculateRiskLevel(report)
+
+	// Generate redacted text using applyRedactions (no recursion)
+	if report.ContainsPHI {
+		report.RedactedText = d.applyRedactions(text, locations)
+	}
+
+	report.DetectionTime = time.Since(startTime)
+
+	return report, nil
+}
+
+// RedactPHI redacts PHI from text and returns the redacted string.
+// This method is safe from recursion as it uses scanInternal directly.
+func (d *phiDetectorImpl) RedactPHI(ctx context.Context, text string) (string, error) {
+	// Use internal scan to avoid recursion (don't call ScanForPHI here)
+	locations := d.scanInternal(text)
+
+	if len(locations) == 0 {
+		return text, nil
+	}
+
+	return d.applyRedactions(text, locations), nil
 }
 
 // ValidateHIPAACompliance checks if text is HIPAA compliant
@@ -223,21 +234,21 @@ func (d *phiDetectorImpl) ValidateHIPAACompliance(ctx context.Context, text stri
 	if err != nil {
 		return false, nil, err
 	}
-	
+
 	violations := []string{}
-	
+
 	if report.ContainsPHI {
 		violations = append(violations, fmt.Sprintf("Text contains %d instances of PHI", report.TotalPHICount))
-		
+
 		if report.HighRiskCount > 0 {
 			violations = append(violations, fmt.Sprintf("Text contains %d high-risk PHI identifiers", report.HighRiskCount))
 		}
-		
+
 		for _, phiType := range report.PHITypes {
 			violations = append(violations, fmt.Sprintf("PHI type detected: %s", phiType))
 		}
 	}
-	
+
 	return len(violations) == 0, violations, nil
 }
 
@@ -274,19 +285,19 @@ func (d *phiDetectorImpl) calculateRiskLevel(report *PHIReport) RiskLevel {
 	if !report.ContainsPHI {
 		return RiskLevelNone
 	}
-	
+
 	// Critical if high-risk PHI found
 	if report.HighRiskCount > 0 {
 		return RiskLevelCritical
 	}
-	
+
 	// Risk based on quantity
 	if report.TotalPHICount >= 10 {
 		return RiskLevelHigh
 	} else if report.TotalPHICount >= 5 {
 		return RiskLevelMedium
 	}
-	
+
 	return RiskLevelLow
 }
 
@@ -312,8 +323,8 @@ const (
 // DeidentifyOptions configures de-identification
 type DeidentifyOptions struct {
 	Method            DeidentificationMethod
-	PreserveStructure bool   // Keep data structure (e.g., date format)
-	ReplacementSeed   int64  // For consistent pseudonymization
+	PreserveStructure bool  // Keep data structure (e.g., date format)
+	ReplacementSeed   int64 // For consistent pseudonymization
 }
 
 // Deidentify applies de-identification to text
@@ -332,20 +343,22 @@ func (d *phiDetectorImpl) Deidentify(ctx context.Context, text string, opts Deid
 
 // generalizePHI generalizes PHI (e.g., specific dates to year only)
 func (d *phiDetectorImpl) generalizePHI(ctx context.Context, text string) (string, error) {
-	report, err := d.ScanForPHI(ctx, text)
-	if err != nil {
-		return "", err
-	}
-	
-	if !report.ContainsPHI {
+	// Use internal scan to avoid recursion
+	locations := d.scanInternal(text)
+
+	if len(locations) == 0 {
 		return text, nil
 	}
-	
+
+	// Sort by start position descending
+	sort.Slice(locations, func(i, j int) bool {
+		return locations[i].Start > locations[j].Start
+	})
+
 	generalized := text
-	
-	for _, location := range report.Locations {
+	for _, location := range locations {
 		var replacement string
-		
+
 		switch location.Type {
 		case PHITypeDateOfBirth:
 			// Replace with year only
@@ -359,12 +372,9 @@ func (d *phiDetectorImpl) generalizePHI(ctx context.Context, text string) (strin
 		default:
 			replacement = d.getRedactionText(location.Type)
 		}
-		
+
 		generalized = generalized[:location.Start] + replacement + generalized[location.End:]
 	}
-	
+
 	return generalized, nil
 }
-
-// PHITypeAge for age detection
-const PHITypeAge PHIType = "age"
