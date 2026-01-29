@@ -1,0 +1,1191 @@
+openapi: 3.1.0
+info:
+  title: ebot API
+  version: 1.0.0
+  description: |
+    ebot is an enterprise-grade MCP (Model Context Protocol) platform for AI agent deployment.
+    
+    ## Authentication
+    All API requests require authentication using a Bearer token obtained from the `/auth/token` endpoint
+    or via SAML SSO.
+    
+    ```
+    Authorization: Bearer <your-token>
+    ```
+    
+    ## Rate Limiting
+    API requests are rate limited to protect the service:
+    - Per-user: 500 requests/second
+    - Per-IP: 100 requests/second
+    - Global: 10,000 requests/second
+    
+    Rate limit headers are included in all responses:
+    - `X-RateLimit-Remaining`: Requests remaining in current window
+    - `X-RateLimit-Reset`: Unix timestamp when the limit resets
+    
+    ## Multi-Tenancy
+    For multi-tenant deployments, include the tenant ID header:
+    ```
+    X-Tenant-ID: <tenant-id>
+    ```
+    
+    ## Pagination
+    List endpoints support pagination using `offset` and `limit` query parameters:
+    - `offset`: Number of items to skip (default: 0)
+    - `limit`: Maximum items to return (default: 20, max: 100)
+    
+  contact:
+    name: ebot Support
+    url: https://github.com/chad-atexpedient/ebot
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: https://api.expedient.cloud
+    description: Production
+  - url: https://api.staging.expedient.cloud
+    description: Staging
+  - url: http://localhost:8080
+    description: Local development
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: MCP Servers
+    description: Manage MCP server instances
+  - name: Threads
+    description: Conversation thread management
+  - name: Agents
+    description: AI agent configuration
+  - name: Workspaces
+    description: Workspace management
+  - name: Knowledge
+    description: Knowledge base operations
+  - name: Quotas
+    description: Resource quota management
+  - name: Costs
+    description: Cost tracking and reporting
+  - name: Access Control
+    description: ABAC policy management
+  - name: Authentication
+    description: Authentication endpoints
+
+paths:
+  # Health check
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Health check endpoint
+      tags: [Health]
+      security: []
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "healthy"
+                  version:
+                    type: string
+                    example: "1.0.0"
+                  timestamp:
+                    type: string
+                    format: date-time
+
+  # MCP Servers
+  /api/mcp-servers:
+    get:
+      operationId: listMCPServers
+      summary: List MCP servers
+      description: Returns a paginated list of MCP servers in the workspace
+      tags: [MCP Servers]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Limit'
+        - name: status
+          in: query
+          description: Filter by status
+          schema:
+            type: string
+            enum: [pending, running, stopped, error]
+      responses:
+        '200':
+          description: List of MCP servers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/MCPServer'
+                  pagination:
+                    $ref: '#/components/schemas/Pagination'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+    
+    post:
+      operationId: createMCPServer
+      summary: Create MCP server
+      description: Creates a new MCP server instance
+      tags: [MCP Servers]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateMCPServerRequest'
+      responses:
+        '201':
+          description: MCP server created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MCPServer'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/mcp-servers/{serverId}:
+    get:
+      operationId: getMCPServer
+      summary: Get MCP server
+      tags: [MCP Servers]
+      parameters:
+        - $ref: '#/components/parameters/ServerId'
+      responses:
+        '200':
+          description: MCP server details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MCPServer'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    
+    put:
+      operationId: updateMCPServer
+      summary: Update MCP server
+      tags: [MCP Servers]
+      parameters:
+        - $ref: '#/components/parameters/ServerId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateMCPServerRequest'
+      responses:
+        '200':
+          description: MCP server updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MCPServer'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    
+    delete:
+      operationId: deleteMCPServer
+      summary: Delete MCP server
+      tags: [MCP Servers]
+      parameters:
+        - $ref: '#/components/parameters/ServerId'
+      responses:
+        '204':
+          description: MCP server deleted
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/mcp-servers/{serverId}/invoke:
+    post:
+      operationId: invokeMCPServer
+      summary: Invoke MCP server tool
+      description: Calls a tool on the MCP server
+      tags: [MCP Servers]
+      parameters:
+        - $ref: '#/components/parameters/ServerId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MCPInvokeRequest'
+      responses:
+        '200':
+          description: Tool invocation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MCPInvokeResponse'
+
+  # Threads
+  /api/threads:
+    get:
+      operationId: listThreads
+      summary: List conversation threads
+      tags: [Threads]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: List of threads
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Thread'
+                  pagination:
+                    $ref: '#/components/schemas/Pagination'
+    
+    post:
+      operationId: createThread
+      summary: Create conversation thread
+      tags: [Threads]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateThreadRequest'
+      responses:
+        '201':
+          description: Thread created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Thread'
+
+  /api/threads/{threadId}:
+    get:
+      operationId: getThread
+      summary: Get thread details
+      tags: [Threads]
+      parameters:
+        - $ref: '#/components/parameters/ThreadId'
+      responses:
+        '200':
+          description: Thread details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Thread'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/threads/{threadId}/messages:
+    get:
+      operationId: listMessages
+      summary: List messages in thread
+      tags: [Threads]
+      parameters:
+        - $ref: '#/components/parameters/ThreadId'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: List of messages
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Message'
+                  pagination:
+                    $ref: '#/components/schemas/Pagination'
+    
+    post:
+      operationId: sendMessage
+      summary: Send message to thread
+      tags: [Threads]
+      parameters:
+        - $ref: '#/components/parameters/ThreadId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendMessageRequest'
+      responses:
+        '201':
+          description: Message sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+
+  # Agents
+  /api/agents:
+    get:
+      operationId: listAgents
+      summary: List AI agents
+      tags: [Agents]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: List of agents
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Agent'
+                  pagination:
+                    $ref: '#/components/schemas/Pagination'
+    
+    post:
+      operationId: createAgent
+      summary: Create AI agent
+      tags: [Agents]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAgentRequest'
+      responses:
+        '201':
+          description: Agent created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Agent'
+
+  # Knowledge Bases
+  /api/knowledge:
+    get:
+      operationId: listKnowledgeBases
+      summary: List knowledge bases
+      tags: [Knowledge]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: List of knowledge bases
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/KnowledgeBase'
+                  pagination:
+                    $ref: '#/components/schemas/Pagination'
+    
+    post:
+      operationId: createKnowledgeBase
+      summary: Create knowledge base
+      tags: [Knowledge]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateKnowledgeBaseRequest'
+      responses:
+        '201':
+          description: Knowledge base created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KnowledgeBase'
+
+  /api/knowledge/{knowledgeId}/query:
+    post:
+      operationId: queryKnowledge
+      summary: Query knowledge base
+      description: Performs semantic search on the knowledge base
+      tags: [Knowledge]
+      parameters:
+        - name: knowledgeId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KnowledgeQueryRequest'
+      responses:
+        '200':
+          description: Query results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KnowledgeQueryResponse'
+
+  # Quotas
+  /api/quotas:
+    get:
+      operationId: listQuotas
+      summary: List resource quotas
+      tags: [Quotas]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: List of quotas
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Quota'
+
+  /api/quotas/{quotaId}:
+    get:
+      operationId: getQuota
+      summary: Get quota details
+      tags: [Quotas]
+      parameters:
+        - name: quotaId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Quota details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Quota'
+
+  # Costs
+  /api/costs/summary:
+    get:
+      operationId: getCostSummary
+      summary: Get cost summary
+      tags: [Costs]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: startDate
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: endDate
+          in: query
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Cost summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CostSummary'
+
+  /api/costs/usage:
+    get:
+      operationId: getUsageReport
+      summary: Get usage report
+      tags: [Costs]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: startDate
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: endDate
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: groupBy
+          in: query
+          schema:
+            type: string
+            enum: [user, model, resource]
+      responses:
+        '200':
+          description: Usage report
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsageReport'
+
+  # Access Control
+  /api/access-control/policies:
+    get:
+      operationId: listPolicies
+      summary: List ABAC policies
+      tags: [Access Control]
+      responses:
+        '200':
+          description: List of policies
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ABACPolicy'
+    
+    post:
+      operationId: createPolicy
+      summary: Create ABAC policy
+      tags: [Access Control]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePolicyRequest'
+      responses:
+        '201':
+          description: Policy created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ABACPolicy'
+
+  /api/access-control/evaluate:
+    post:
+      operationId: evaluateAccess
+      summary: Evaluate access request
+      description: Checks if an action is allowed based on ABAC policies
+      tags: [Access Control]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AccessEvaluationRequest'
+      responses:
+        '200':
+          description: Evaluation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccessEvaluationResponse'
+
+  # Authentication
+  /auth/saml/metadata:
+    get:
+      operationId: getSAMLMetadata
+      summary: Get SAML SP metadata
+      tags: [Authentication]
+      security: []
+      responses:
+        '200':
+          description: SAML metadata XML
+          content:
+            application/xml:
+              schema:
+                type: string
+
+  /auth/saml/login:
+    get:
+      operationId: initiateSAMLLogin
+      summary: Initiate SAML SSO login
+      tags: [Authentication]
+      security: []
+      parameters:
+        - name: redirect
+          in: query
+          description: URL to redirect after login
+          schema:
+            type: string
+      responses:
+        '302':
+          description: Redirect to IdP
+
+  /auth/saml/acs:
+    post:
+      operationId: handleSAMLCallback
+      summary: SAML Assertion Consumer Service
+      tags: [Authentication]
+      security: []
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                SAMLResponse:
+                  type: string
+                RelayState:
+                  type: string
+      responses:
+        '302':
+          description: Redirect to application
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token obtained from authentication
+
+  parameters:
+    WorkspaceId:
+      name: workspaceId
+      in: query
+      description: Filter by workspace ID
+      schema:
+        type: string
+        format: uuid
+    
+    Offset:
+      name: offset
+      in: query
+      description: Number of items to skip
+      schema:
+        type: integer
+        default: 0
+        minimum: 0
+    
+    Limit:
+      name: limit
+      in: query
+      description: Maximum items to return
+      schema:
+        type: integer
+        default: 20
+        minimum: 1
+        maximum: 100
+    
+    ServerId:
+      name: serverId
+      in: path
+      required: true
+      description: MCP Server ID
+      schema:
+        type: string
+        format: uuid
+    
+    ThreadId:
+      name: threadId
+      in: path
+      required: true
+      description: Thread ID
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+    MCPServer:
+      type: object
+      required: [id, name, status, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          example: "my-mcp-server"
+        description:
+          type: string
+          maxLength: 500
+        status:
+          type: string
+          enum: [pending, running, stopped, error]
+        workspaceId:
+          type: string
+          format: uuid
+        tools:
+          type: array
+          items:
+            $ref: '#/components/schemas/MCPTool'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    MCPTool:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        inputSchema:
+          type: object
+
+    CreateMCPServerRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        description:
+          type: string
+        workspaceId:
+          type: string
+          format: uuid
+        manifest:
+          type: object
+
+    UpdateMCPServerRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        status:
+          type: string
+          enum: [running, stopped]
+
+    MCPInvokeRequest:
+      type: object
+      required: [toolName]
+      properties:
+        toolName:
+          type: string
+        arguments:
+          type: object
+
+    MCPInvokeResponse:
+      type: object
+      properties:
+        result:
+          type: object
+        error:
+          type: string
+        executionTime:
+          type: number
+
+    Thread:
+      type: object
+      required: [id, title, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        workspaceId:
+          type: string
+          format: uuid
+        agentId:
+          type: string
+          format: uuid
+        messageCount:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    CreateThreadRequest:
+      type: object
+      properties:
+        title:
+          type: string
+        workspaceId:
+          type: string
+          format: uuid
+        agentId:
+          type: string
+          format: uuid
+
+    Message:
+      type: object
+      required: [id, role, content, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        role:
+          type: string
+          enum: [user, assistant, system, tool]
+        content:
+          type: string
+        toolCalls:
+          type: array
+          items:
+            type: object
+        createdAt:
+          type: string
+          format: date-time
+
+    SendMessageRequest:
+      type: object
+      required: [content]
+      properties:
+        content:
+          type: string
+        attachments:
+          type: array
+          items:
+            type: object
+
+    Agent:
+      type: object
+      required: [id, name, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        systemPrompt:
+          type: string
+        model:
+          type: string
+        tools:
+          type: array
+          items:
+            type: string
+        knowledgeBases:
+          type: array
+          items:
+            type: string
+            format: uuid
+        createdAt:
+          type: string
+          format: date-time
+
+    CreateAgentRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        systemPrompt:
+          type: string
+        model:
+          type: string
+        tools:
+          type: array
+          items:
+            type: string
+        knowledgeBases:
+          type: array
+          items:
+            type: string
+            format: uuid
+
+    KnowledgeBase:
+      type: object
+      required: [id, name, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        documentCount:
+          type: integer
+        chunkCount:
+          type: integer
+        status:
+          type: string
+          enum: [processing, ready, error]
+        createdAt:
+          type: string
+          format: date-time
+
+    CreateKnowledgeBaseRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        workspaceId:
+          type: string
+          format: uuid
+
+    KnowledgeQueryRequest:
+      type: object
+      required: [query]
+      properties:
+        query:
+          type: string
+        topK:
+          type: integer
+          default: 5
+        threshold:
+          type: number
+          default: 0.7
+
+    KnowledgeQueryResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              content:
+                type: string
+              score:
+                type: number
+              metadata:
+                type: object
+
+    Quota:
+      type: object
+      properties:
+        id:
+          type: string
+        resourceType:
+          type: string
+        limit:
+          type: integer
+        used:
+          type: integer
+        remaining:
+          type: integer
+
+    CostSummary:
+      type: object
+      properties:
+        totalCost:
+          type: number
+        currency:
+          type: string
+          default: "USD"
+        byCategory:
+          type: object
+          additionalProperties:
+            type: number
+        byDay:
+          type: array
+          items:
+            type: object
+            properties:
+              date:
+                type: string
+                format: date
+              cost:
+                type: number
+
+    UsageReport:
+      type: object
+      properties:
+        totalRequests:
+          type: integer
+        totalTokens:
+          type: integer
+        totalCost:
+          type: number
+        byUser:
+          type: object
+        byModel:
+          type: object
+
+    ABACPolicy:
+      type: object
+      required: [id, name, effect]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        effect:
+          type: string
+          enum: [allow, deny]
+        condition:
+          type: string
+          description: CEL expression
+        enabled:
+          type: boolean
+          default: true
+
+    CreatePolicyRequest:
+      type: object
+      required: [name, effect]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        effect:
+          type: string
+          enum: [allow, deny]
+        condition:
+          type: string
+        enabled:
+          type: boolean
+          default: true
+
+    AccessEvaluationRequest:
+      type: object
+      required: [subject, resource, action]
+      properties:
+        subject:
+          type: object
+          properties:
+            id:
+              type: string
+            type:
+              type: string
+            groups:
+              type: array
+              items:
+                type: string
+            roles:
+              type: array
+              items:
+                type: string
+        resource:
+          type: object
+          properties:
+            id:
+              type: string
+            type:
+              type: string
+            owner:
+              type: string
+        action:
+          type: string
+
+    AccessEvaluationResponse:
+      type: object
+      properties:
+        allowed:
+          type: boolean
+        reason:
+          type: string
+        appliedPolicy:
+          type: string
+
+    Pagination:
+      type: object
+      properties:
+        offset:
+          type: integer
+        limit:
+          type: integer
+        total:
+          type: integer
+        hasMore:
+          type: boolean
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: "VALIDATION_ERROR"
+        message:
+          type: string
+          example: "Invalid request parameters"
+        details:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              message:
+                type: string
+        requestId:
+          type: string
+          format: uuid
+
+  responses:
+    BadRequest:
+      description: Bad Request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    
+    Unauthorized:
+      description: Unauthorized - Invalid or missing authentication
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    
+    Forbidden:
+      description: Forbidden - Insufficient permissions
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    
+    NotFound:
+      description: Not Found - Resource does not exist
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    
+    RateLimited:
+      description: Rate Limited - Too many requests
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+          description: Seconds to wait before retry
+        X-RateLimit-Remaining:
+          schema:
+            type: integer
+          description: Requests remaining
+        X-RateLimit-Reset:
+          schema:
+            type: integer
+          description: Unix timestamp when limit resets
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
