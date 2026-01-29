@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,34 +38,39 @@ type RateLimitConfig struct {
 	EnableAdaptive     bool
 	LoadThreshold      float64 // 0.0-1.0, trigger adaptive limiting above this
 	AdaptiveMultiplier float64 // Multiply limits by this factor when under load
+
+	// Trusted proxy configuration (SECURITY FIX for #6)
+	TrustedProxies     []string // CIDR ranges of trusted proxies
+	TrustXForwardedFor bool     // Only trust X-Forwarded-For when request comes from trusted proxy
 }
 
 // EndpointLimit configures per-endpoint rate limits
 type EndpointLimit struct {
-	Path               string
-	RequestsPerSecond  int
-	BurstSize          int
-	RequireAuth        bool
-	SkipForAdmins      bool
-	CustomHeaderName   string // Optional custom header for rate limit status
+	Path              string
+	RequestsPerSecond int
+	BurstSize         int
+	RequireAuth       bool
+	SkipForAdmins     bool
+	CustomHeaderName  string // Optional custom header for rate limit status
 }
 
 // RateLimiter provides advanced rate limiting with DDoS protection
 type RateLimiter struct {
-	config      *RateLimitConfig
-	cache       cache.CacheManager
-	blockedIPs  sync.Map // map[string]time.Time
-	ipCounters  sync.Map // map[string]*ipCounter
-	mu          sync.RWMutex
-	systemLoad  float64 // Current system load (0.0-1.0)
+	config         *RateLimitConfig
+	cache          cache.CacheManager
+	blockedIPs     sync.Map // map[string]time.Time
+	ipCounters     sync.Map // map[string]*ipCounter
+	trustedNets    []*net.IPNet
+	mu             sync.RWMutex
+	systemLoad     float64 // Current system load (0.0-1.0)
 }
 
 // ipCounter tracks requests from a specific IP
 type ipCounter struct {
-	count      int64
+	count       int64
 	windowStart time.Time
-	blocked    bool
-	mu         sync.Mutex
+	blocked     bool
+	mu          sync.Mutex
 }
 
 // NewRateLimiter creates a new rate limiter
@@ -74,8 +80,29 @@ func NewRateLimiter(config *RateLimitConfig, cacheManager cache.CacheManager) *R
 	}
 
 	rl := &RateLimiter{
-		config: config,
-		cache:  cacheManager,
+		config:      config,
+		cache:       cacheManager,
+		trustedNets: make([]*net.IPNet, 0),
+	}
+
+	// Parse trusted proxy CIDR ranges
+	for _, cidr := range config.TrustedProxies {
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			// Try parsing as single IP
+			ip := net.ParseIP(cidr)
+			if ip != nil {
+				// Convert single IP to /32 or /128 CIDR
+				if ip.To4() != nil {
+					_, ipNet, _ = net.ParseCIDR(cidr + "/32")
+				} else {
+					_, ipNet, _ = net.ParseCIDR(cidr + "/128")
+				}
+			}
+		}
+		if ipNet != nil {
+			rl.trustedNets = append(rl.trustedNets, ipNet)
+		}
 	}
 
 	// Start background cleanup
@@ -105,6 +132,9 @@ func DefaultRateLimitConfig() *RateLimitConfig {
 		EnableAdaptive:        true,
 		LoadThreshold:         0.8,
 		AdaptiveMultiplier:    0.5,
+		// Secure defaults: don't trust forwarded headers by default
+		TrustedProxies:     []string{},
+		TrustXForwardedFor: false,
 	}
 }
 
@@ -112,7 +142,7 @@ func DefaultRateLimitConfig() *RateLimitConfig {
 func (rl *RateLimiter) CheckLimit(r *http.Request, userID string) (*RateLimitResult, error) {
 	ctx := r.Context()
 
-	// Extract IP address
+	// Extract IP address securely
 	ip := rl.getClientIP(r)
 
 	// Check if IP is blocked
@@ -279,7 +309,7 @@ func (rl *RateLimiter) isIPBlocked(ip string) (bool, time.Time) {
 	if time.Now().After(until) {
 		// Block expired, remove it
 		rl.blockedIPs.Delete(ip)
-		
+
 		// Reset counter
 		if val, ok := rl.ipCounters.Load(ip); ok {
 			counter := val.(*ipCounter)
@@ -288,35 +318,176 @@ func (rl *RateLimiter) isIPBlocked(ip string) (bool, time.Time) {
 			counter.count = 0
 			counter.mu.Unlock()
 		}
-		
+
 		return false, time.Time{}
 	}
 
 	return true, until
 }
 
-// getClientIP extracts the real client IP from request
+// isTrustedProxy checks if an IP is from a trusted proxy
+func (rl *RateLimiter) isTrustedProxy(ip string) bool {
+	if len(rl.trustedNets) == 0 {
+		return false
+	}
+
+	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil {
+		return false
+	}
+
+	for _, ipNet := range rl.trustedNets {
+		if ipNet.Contains(parsedIP) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// getClientIP extracts the real client IP from request SECURELY
+// This fixes the X-Forwarded-For spoofing vulnerability (#6)
 func (rl *RateLimiter) getClientIP(r *http.Request) string {
-	// Check X-Forwarded-For header (proxy/load balancer)
+	// Get the direct connection IP first
+	directIP := extractIPFromAddr(r.RemoteAddr)
+
+	// If X-Forwarded-For headers are not trusted, always use direct IP
+	if !rl.config.TrustXForwardedFor {
+		return directIP
+	}
+
+	// Only trust X-Forwarded-For if the direct connection is from a trusted proxy
+	if !rl.isTrustedProxy(directIP) {
+		return directIP
+	}
+
+	// Parse X-Forwarded-For header securely
+	// X-Forwarded-For: client, proxy1, proxy2
+	// We need to find the rightmost untrusted IP (working backwards)
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		// Take the first IP (client's real IP)
-		if ip, _, err := net.SplitHostPort(xff); err == nil {
+		ips := parseXForwardedFor(xff)
+
+		// Walk backwards through the chain, finding the first untrusted IP
+		// This is the real client IP
+		for i := len(ips) - 1; i >= 0; i-- {
+			ip := ips[i]
+			if !rl.isTrustedProxy(ip) {
+				// This is the real client IP
+				return ip
+			}
+		}
+
+		// All IPs in the chain are trusted (unusual), use the first one
+		if len(ips) > 0 {
+			return ips[0]
+		}
+	}
+
+	// Check X-Real-IP header (only if from trusted proxy)
+	if xri := r.Header.Get("X-Real-IP"); xri != "" {
+		ip := strings.TrimSpace(xri)
+		if net.ParseIP(ip) != nil {
 			return ip
 		}
-		return xff
 	}
 
-	// Check X-Real-IP header
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return xri
+	// Fall back to direct IP
+	return directIP
+}
+
+// parseXForwardedFor parses the X-Forwarded-For header into individual IPs
+func parseXForwardedFor(xff string) []string {
+	var ips []string
+
+	parts := strings.Split(xff, ",")
+	for _, part := range parts {
+		ip := strings.TrimSpace(part)
+
+		// Handle IPv6 with port: [::1]:8080
+		if strings.HasPrefix(ip, "[") {
+			if idx := strings.Index(ip, "]:"); idx != -1 {
+				ip = ip[1:idx]
+			} else if strings.HasSuffix(ip, "]") {
+				ip = ip[1 : len(ip)-1]
+			}
+		} else if idx := strings.LastIndex(ip, ":"); idx != -1 {
+			// Handle IPv4 with port: 192.168.1.1:8080
+			// But be careful with IPv6 without brackets
+			potentialIP := ip[:idx]
+			if net.ParseIP(potentialIP) != nil {
+				ip = potentialIP
+			}
+		}
+
+		// Validate that it's a proper IP
+		if net.ParseIP(ip) != nil {
+			ips = append(ips, ip)
+		}
 	}
 
-	// Fall back to RemoteAddr
-	if ip, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+	return ips
+}
+
+// extractIPFromAddr extracts IP from host:port format
+func extractIPFromAddr(addr string) string {
+	// Handle IPv6 addresses with brackets
+	if strings.HasPrefix(addr, "[") {
+		if idx := strings.Index(addr, "]:"); idx != -1 {
+			return addr[1:idx]
+		}
+		if strings.HasSuffix(addr, "]") {
+			return addr[1 : len(addr)-1]
+		}
+	}
+
+	// Try net.SplitHostPort
+	if ip, _, err := net.SplitHostPort(addr); err == nil {
 		return ip
 	}
 
-	return r.RemoteAddr
+	// Return as-is (might already be just an IP)
+	return addr
+}
+
+// SetTrustedProxies updates the list of trusted proxy CIDR ranges
+func (rl *RateLimiter) SetTrustedProxies(cidrs []string) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	rl.trustedNets = make([]*net.IPNet, 0)
+	rl.config.TrustedProxies = cidrs
+
+	for _, cidr := range cidrs {
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			// Try parsing as single IP
+			ip := net.ParseIP(cidr)
+			if ip != nil {
+				if ip.To4() != nil {
+					_, ipNet, _ = net.ParseCIDR(cidr + "/32")
+				} else {
+					_, ipNet, _ = net.ParseCIDR(cidr + "/128")
+				}
+			}
+		}
+		if ipNet != nil {
+			rl.trustedNets = append(rl.trustedNets, ipNet)
+		}
+	}
+}
+
+// GetTrustedProxies returns the list of trusted proxy CIDR ranges
+func (rl *RateLimiter) GetTrustedProxies() []string {
+	rl.mu.RLock()
+	defer rl.mu.RUnlock()
+	return rl.config.TrustedProxies
+}
+
+// EnableXForwardedForTrust enables trusting X-Forwarded-For from trusted proxies
+func (rl *RateLimiter) EnableXForwardedForTrust(enable bool) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	rl.config.TrustXForwardedFor = enable
 }
 
 // UpdateSystemLoad updates current system load for adaptive rate limiting
