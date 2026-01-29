@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,11 +19,11 @@ type PCICompliance interface {
 	ScanForCardData(ctx context.Context, text string) (*CardDataReport, error)
 	MaskCardData(ctx context.Context, text string) (string, error)
 	TokenizeCardData(ctx context.Context, text string, method TokenizationMethod) (string, error)
-	
+
 	// Compliance validation
 	ValidateCDE(ctx context.Context, scope CDEScope) (*CDEValidation, error)
 	GenerateSAQ(ctx context.Context, orgID string) (*SAQReport, error)
-	
+
 	// Audit and reporting
 	GetComplianceStatus(ctx context.Context, orgID string) (*PCIStatus, error)
 }
@@ -138,11 +139,11 @@ const (
 
 // pciComplianceManager implements PCICompliance
 type pciComplianceManager struct {
-	mu          sync.RWMutex
-	patterns    map[CardDataType]*regexp.Regexp
-	statuses    map[string]*PCIStatus
-	tokenVault  map[string]string
-	logger      Logger
+	mu         sync.RWMutex
+	patterns   map[CardDataType]*regexp.Regexp
+	statuses   map[string]*PCIStatus
+	tokenVault map[string]string
+	logger     Logger
 }
 
 type Logger interface {
@@ -159,29 +160,135 @@ func NewPCICompliance(logger Logger) PCICompliance {
 		tokenVault: make(map[string]string),
 		logger:     logger,
 	}
-	
+
 	m.initPatterns()
 	return m
 }
 
 func (m *pciComplianceManager) initPatterns() {
-	// Primary Account Number (PAN) - Luhn algorithm validation would be done separately
+	// Primary Account Number (PAN) - matches card number formats
+	// Luhn validation is performed separately after pattern matching
 	m.patterns[CardDataTypePAN] = regexp.MustCompile(`\b(?:\d{4}[\s-]?){3}\d{4}\b`)
-	
-	// CVV/CVC/CSC (3 or 4 digits)
-	m.patterns[CardDataTypeCVV] = regexp.MustCompile(`\b\d{3,4}\b`)
-	
+
+	// CVV/CVC/CSC - IMPROVED: Only match in context of card data
+	// Must be preceded by CVV/CVC/CSC/Security Code keywords to avoid false positives
+	m.patterns[CardDataTypeCVV] = regexp.MustCompile(`(?i)(?:cvv|cvc|csc|cvv2|cvc2|security\s*code|card\s*verification)[\s:]*(\d{3,4})\b`)
+
 	// Expiration date (MM/YY, MM/YYYY, MM-YY, MMYY)
 	m.patterns[CardDataTypeExpiry] = regexp.MustCompile(`\b(?:0[1-9]|1[0-2])[-/]?(?:\d{2}|\d{4})\b`)
-	
+
 	// Track data (starts with %)
 	m.patterns[CardDataTypeTrackData] = regexp.MustCompile(`%[A-Z0-9]{1,19}\^[A-Z\s]{2,26}\^[0-9]{4}`)
+}
+
+// ValidateLuhn validates a PAN using the Luhn algorithm (ISO/IEC 7812-1)
+// This is required by PCI DSS for proper PAN detection
+func ValidateLuhn(pan string) bool {
+	// Remove all non-digit characters
+	clean := ""
+	for _, r := range pan {
+		if r >= '0' && r <= '9' {
+			clean += string(r)
+		}
+	}
+
+	// PAN must be between 13 and 19 digits
+	if len(clean) < 13 || len(clean) > 19 {
+		return false
+	}
+
+	// Luhn algorithm implementation
+	sum := 0
+	isSecond := false
+
+	// Process from right to left
+	for i := len(clean) - 1; i >= 0; i-- {
+		digit, _ := strconv.Atoi(string(clean[i]))
+
+		if isSecond {
+			digit *= 2
+			if digit > 9 {
+				digit -= 9
+			}
+		}
+
+		sum += digit
+		isSecond = !isSecond
+	}
+
+	return sum%10 == 0
+}
+
+// GetCardIssuer identifies the card issuer based on BIN/IIN
+func GetCardIssuer(pan string) string {
+	clean := ""
+	for _, r := range pan {
+		if r >= '0' && r <= '9' {
+			clean += string(r)
+		}
+	}
+
+	if len(clean) < 6 {
+		return "Unknown"
+	}
+
+	// Check card issuer based on BIN ranges
+	prefix1 := clean[0:1]
+	prefix2 := clean[0:2]
+	prefix4 := clean[0:4]
+
+	// Visa: starts with 4
+	if prefix1 == "4" {
+		return "Visa"
+	}
+
+	// Mastercard: 51-55 or 2221-2720
+	if prefix2 >= "51" && prefix2 <= "55" {
+		return "Mastercard"
+	}
+	if prefix4 >= "2221" && prefix4 <= "2720" {
+		return "Mastercard"
+	}
+
+	// American Express: 34, 37
+	if prefix2 == "34" || prefix2 == "37" {
+		return "American Express"
+	}
+
+	// Discover: 6011, 644-649, 65
+	if prefix4 == "6011" || prefix2 == "65" {
+		return "Discover"
+	}
+	if len(clean) >= 3 {
+		prefix3 := clean[0:3]
+		if prefix3 >= "644" && prefix3 <= "649" {
+			return "Discover"
+		}
+	}
+
+	// JCB: 3528-3589
+	if prefix4 >= "3528" && prefix4 <= "3589" {
+		return "JCB"
+	}
+
+	// Diners Club: 36, 38, 300-305
+	if prefix2 == "36" || prefix2 == "38" {
+		return "Diners Club"
+	}
+	if len(clean) >= 3 {
+		prefix3 := clean[0:3]
+		if prefix3 >= "300" && prefix3 <= "305" {
+			return "Diners Club"
+		}
+	}
+
+	return "Unknown"
 }
 
 func (m *pciComplianceManager) ScanForCardData(ctx context.Context, text string) (*CardDataReport, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	
+
 	report := &CardDataReport{
 		ContainsCardData: false,
 		DataTypes:        []CardDataType{},
@@ -189,33 +296,100 @@ func (m *pciComplianceManager) ScanForCardData(ctx context.Context, text string)
 		RiskLevel:        RiskLevelNone,
 		Recommendations:  []string{},
 	}
-	
-	// Scan for each type of card data
-	for dataType, pattern := range m.patterns {
+
+	// Scan for PANs with Luhn validation
+	if pattern, ok := m.patterns[CardDataTypePAN]; ok {
+		matches := pattern.FindAllStringIndex(text, -1)
+		for _, match := range matches {
+			potentialPAN := text[match[0]:match[1]]
+
+			// Validate using Luhn algorithm - only report if valid
+			if ValidateLuhn(potentialPAN) {
+				report.ContainsCardData = true
+				if !containsType(report.DataTypes, CardDataTypePAN) {
+					report.DataTypes = append(report.DataTypes, CardDataTypePAN)
+				}
+
+				location := CardDataLocation{
+					Type:  CardDataTypePAN,
+					Start: match[0],
+					End:   match[1],
+					Value: potentialPAN,
+				}
+				report.Locations = append(report.Locations, location)
+				report.PANCount++
+			}
+		}
+	}
+
+	// Scan for CVV with contextual matching (improved pattern)
+	if pattern, ok := m.patterns[CardDataTypeCVV]; ok {
+		matches := pattern.FindAllStringSubmatchIndex(text, -1)
+		for _, match := range matches {
+			// match[2] and match[3] are the indices of the captured group (the actual CVV digits)
+			if len(match) >= 4 && match[2] >= 0 && match[3] >= 0 {
+				cvvValue := text[match[2]:match[3]]
+				report.ContainsCardData = true
+				if !containsType(report.DataTypes, CardDataTypeCVV) {
+					report.DataTypes = append(report.DataTypes, CardDataTypeCVV)
+				}
+
+				location := CardDataLocation{
+					Type:  CardDataTypeCVV,
+					Start: match[2],
+					End:   match[3],
+					Value: cvvValue,
+				}
+				report.Locations = append(report.Locations, location)
+				report.CVVCount++
+			}
+		}
+	}
+
+	// Scan for expiration dates (only if PAN found nearby for context)
+	if report.PANCount > 0 {
+		if pattern, ok := m.patterns[CardDataTypeExpiry]; ok {
+			matches := pattern.FindAllStringIndex(text, -1)
+			if len(matches) > 0 {
+				report.ContainsCardData = true
+				if !containsType(report.DataTypes, CardDataTypeExpiry) {
+					report.DataTypes = append(report.DataTypes, CardDataTypeExpiry)
+				}
+
+				for _, match := range matches {
+					location := CardDataLocation{
+						Type:  CardDataTypeExpiry,
+						Start: match[0],
+						End:   match[1],
+						Value: text[match[0]:match[1]],
+					}
+					report.Locations = append(report.Locations, location)
+				}
+			}
+		}
+	}
+
+	// Scan for track data
+	if pattern, ok := m.patterns[CardDataTypeTrackData]; ok {
 		matches := pattern.FindAllStringIndex(text, -1)
 		if len(matches) > 0 {
 			report.ContainsCardData = true
-			report.DataTypes = append(report.DataTypes, dataType)
-			
+			if !containsType(report.DataTypes, CardDataTypeTrackData) {
+				report.DataTypes = append(report.DataTypes, CardDataTypeTrackData)
+			}
+
 			for _, match := range matches {
 				location := CardDataLocation{
-					Type:  dataType,
+					Type:  CardDataTypeTrackData,
 					Start: match[0],
 					End:   match[1],
 					Value: text[match[0]:match[1]],
 				}
 				report.Locations = append(report.Locations, location)
-				
-				// Count PANs and CVVs
-				if dataType == CardDataTypePAN {
-					report.PANCount++
-				} else if dataType == CardDataTypeCVV {
-					report.CVVCount++
-				}
 			}
 		}
 	}
-	
+
 	// Assess risk level
 	if report.PANCount > 0 {
 		report.RiskLevel = RiskLevelCritical
@@ -225,7 +399,7 @@ func (m *pciComplianceManager) ScanForCardData(ctx context.Context, text string)
 			"Implement PCI DSS requirements 3.3 and 3.4",
 		)
 	}
-	
+
 	if report.CVVCount > 0 {
 		report.RiskLevel = RiskLevelCritical
 		report.Recommendations = append(report.Recommendations,
@@ -233,25 +407,39 @@ func (m *pciComplianceManager) ScanForCardData(ctx context.Context, text string)
 			"Purge all CVV data immediately",
 		)
 	}
-	
+
 	if len(report.DataTypes) > 0 && report.RiskLevel != RiskLevelCritical {
 		report.RiskLevel = RiskLevelHigh
 	}
-	
+
 	m.logger.Info("PCI scan completed", "cardDataFound", report.ContainsCardData, "riskLevel", report.RiskLevel)
-	
+
 	return report, nil
+}
+
+// containsType checks if a CardDataType slice contains a specific type
+func containsType(types []CardDataType, t CardDataType) bool {
+	for _, existing := range types {
+		if existing == t {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *pciComplianceManager) MaskCardData(ctx context.Context, text string) (string, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	
+
 	result := text
-	
-	// Mask PAN - show only last 4 digits
+
+	// Mask PAN - show only last 4 digits (only for Luhn-valid PANs)
 	if pattern, ok := m.patterns[CardDataTypePAN]; ok {
 		result = pattern.ReplaceAllStringFunc(result, func(pan string) string {
+			// Only mask if it's a valid PAN
+			if !ValidateLuhn(pan) {
+				return pan
+			}
 			// Remove spaces/dashes
 			clean := strings.ReplaceAll(strings.ReplaceAll(pan, " ", ""), "-", "")
 			if len(clean) >= 4 {
@@ -260,54 +448,66 @@ func (m *pciComplianceManager) MaskCardData(ctx context.Context, text string) (s
 			return strings.Repeat("*", len(clean))
 		})
 	}
-	
-	// Mask CVV completely
+
+	// Mask CVV completely (using the improved contextual pattern)
 	if pattern, ok := m.patterns[CardDataTypeCVV]; ok {
-		result = pattern.ReplaceAllString(result, "***")
+		result = pattern.ReplaceAllStringFunc(result, func(match string) string {
+			// Find where the digits are and replace them
+			digitPattern := regexp.MustCompile(`\d{3,4}$`)
+			return digitPattern.ReplaceAllString(match, "***")
+		})
 	}
-	
+
 	// Mask expiration date
 	if pattern, ok := m.patterns[CardDataTypeExpiry]; ok {
 		result = pattern.ReplaceAllString(result, "**/**")
 	}
-	
+
 	return result, nil
 }
 
 func (m *pciComplianceManager) TokenizeCardData(ctx context.Context, text string, method TokenizationMethod) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	result := text
-	
+
 	switch method {
 	case TokenMethodFormatPreserving:
 		// Format-preserving tokenization (maintains format)
 		if pattern, ok := m.patterns[CardDataTypePAN]; ok {
 			result = pattern.ReplaceAllStringFunc(result, func(pan string) string {
+				// Only tokenize valid PANs
+				if !ValidateLuhn(pan) {
+					return pan
+				}
 				token := m.generateFormatPreservingToken(pan)
 				m.tokenVault[token] = pan
 				return token
 			})
 		}
-		
+
 	case TokenMethodHash:
 		// One-way hash (irreversible)
 		if pattern, ok := m.patterns[CardDataTypePAN]; ok {
 			result = pattern.ReplaceAllStringFunc(result, func(pan string) string {
+				// Only hash valid PANs
+				if !ValidateLuhn(pan) {
+					return pan
+				}
 				hash := sha256.Sum256([]byte(pan))
 				return "tok_" + hex.EncodeToString(hash[:16])
 			})
 		}
-		
+
 	case TokenMethodMasking:
 		// Simple masking
 		return m.MaskCardData(ctx, text)
-		
+
 	default:
 		return "", fmt.Errorf("unsupported tokenization method: %s", method)
 	}
-	
+
 	m.logger.Info("Card data tokenized", "method", method)
 	return result, nil
 }
@@ -316,15 +516,15 @@ func (m *pciComplianceManager) generateFormatPreservingToken(pan string) string 
 	// Simplified format-preserving tokenization
 	// In production, use FPE (Format-Preserving Encryption) algorithms like FF3-1
 	clean := strings.ReplaceAll(strings.ReplaceAll(pan, " ", ""), "-", "")
-	if len(clean) < 4 {
+	if len(clean) < 10 {
 		return clean
 	}
-	
+
 	// Keep first 6 (BIN) and last 4 digits, tokenize middle
 	prefix := clean[:6]
 	suffix := clean[len(clean)-4:]
 	middle := strings.Repeat("X", len(clean)-10)
-	
+
 	return prefix + middle + suffix
 }
 
@@ -339,7 +539,7 @@ func (m *pciComplianceManager) ValidateCDE(ctx context.Context, scope CDEScope) 
 		MonitoringOK:     true,
 		Recommendations:  []string{},
 	}
-	
+
 	// Validate segmentation
 	if len(scope.SegmentedFrom) == 0 {
 		validation.SegmentationOK = false
@@ -350,23 +550,23 @@ func (m *pciComplianceManager) ValidateCDE(ctx context.Context, scope CDEScope) 
 			"Implement network segmentation using firewalls or VLANs",
 			"Document network segmentation architecture")
 	}
-	
+
 	// Validate scope completeness
 	if len(scope.Systems) == 0 && len(scope.Applications) == 0 {
 		validation.IsCompliant = false
 		validation.Violations = append(validation.Violations,
 			"CDE scope must include all systems and applications that store, process, or transmit cardholder data")
 	}
-	
+
 	m.logger.Info("CDE validation completed", "compliant", validation.IsCompliant)
-	
+
 	return validation, nil
 }
 
 func (m *pciComplianceManager) GenerateSAQ(ctx context.Context, orgID string) (*SAQReport, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	report := &SAQReport{
 		Type:            "SAQ D", // Most comprehensive
 		Date:            time.Now(),
@@ -376,7 +576,7 @@ func (m *pciComplianceManager) GenerateSAQ(ctx context.Context, orgID string) (*
 		AttestationOK:   false,
 		AOCGenerated:    false,
 	}
-	
+
 	// Check compliance for all requirements
 	compliantCount := 0
 	for _, req := range report.Requirements {
@@ -384,7 +584,7 @@ func (m *pciComplianceManager) GenerateSAQ(ctx context.Context, orgID string) (*
 			compliantCount++
 		}
 	}
-	
+
 	if compliantCount == len(report.Requirements) {
 		report.ComplianceLevel = "Compliant"
 		report.AttestationOK = true
@@ -393,9 +593,9 @@ func (m *pciComplianceManager) GenerateSAQ(ctx context.Context, orgID string) (*
 	} else {
 		report.ComplianceLevel = "Non-Compliant"
 	}
-	
+
 	m.logger.Info("SAQ generated", "type", report.Type, "level", report.ComplianceLevel)
-	
+
 	return report, nil
 }
 
@@ -436,7 +636,7 @@ func (m *pciComplianceManager) getSAQRequirements() []SAQRequirement {
 func (m *pciComplianceManager) GetComplianceStatus(ctx context.Context, orgID string) (*PCIStatus, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	
+
 	status, exists := m.statuses[orgID]
 	if !exists {
 		status = &PCIStatus{
@@ -450,6 +650,6 @@ func (m *pciComplianceManager) GetComplianceStatus(ctx context.Context, orgID st
 			RemediationItems: []string{},
 		}
 	}
-	
+
 	return status, nil
 }
