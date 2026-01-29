@@ -4,6 +4,7 @@ package load
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -53,7 +54,7 @@ type RequestFunc func(ctx context.Context) error
 type LoadTester struct {
 	config  LoadTestConfig
 	results *LoadTestResult
-	
+
 	latencies []time.Duration
 	mu        sync.Mutex
 }
@@ -114,7 +115,7 @@ func (lt *LoadTester) Run(ctx context.Context, fn RequestFunc) (*LoadTestResult,
 	// Start workers
 	for i := 0; i < lt.config.Concurrency; i++ {
 		wg.Add(1)
-		
+
 		// Ramp up gradually
 		if lt.config.RampUpDuration > 0 {
 			delay := time.Duration(i) * lt.config.RampUpDuration / time.Duration(lt.config.Concurrency)
@@ -132,11 +133,11 @@ func (lt *LoadTester) Run(ctx context.Context, fn RequestFunc) (*LoadTestResult,
 
 				// Make request
 				reqCtx, cancel := context.WithTimeout(ctx, lt.config.RequestTimeout)
-				
+
 				reqStart := time.Now()
 				err := fn(reqCtx)
 				latency := time.Since(reqStart)
-				
+
 				cancel()
 
 				// Record results
@@ -182,23 +183,19 @@ func (lt *LoadTester) Run(ctx context.Context, fn RequestFunc) (*LoadTestResult,
 }
 
 // calculatePercentiles calculates latency percentiles
+// Uses sort.Slice for O(n log n) performance instead of O(n²) bubble sort
 func (lt *LoadTester) calculatePercentiles() {
 	if len(lt.latencies) == 0 {
 		return
 	}
 
-	// Sort latencies
+	// Sort latencies - O(n log n) using Go's optimized sort
 	sortedLatencies := make([]time.Duration, len(lt.latencies))
 	copy(sortedLatencies, lt.latencies)
-	
-	// Simple bubble sort (good enough for testing)
-	for i := 0; i < len(sortedLatencies); i++ {
-		for j := i + 1; j < len(sortedLatencies); j++ {
-			if sortedLatencies[i] > sortedLatencies[j] {
-				sortedLatencies[i], sortedLatencies[j] = sortedLatencies[j], sortedLatencies[i]
-			}
-		}
-	}
+
+	sort.Slice(sortedLatencies, func(i, j int) bool {
+		return sortedLatencies[i] < sortedLatencies[j]
+	})
 
 	// Calculate average
 	var total time.Duration
@@ -229,7 +226,11 @@ func (r *LoadTestResult) PrintResults() {
 	fmt.Println("║           Load Test Results                           ║")
 	fmt.Println("╠═══════════════════════════════════════════════════════╣")
 	fmt.Printf("║ Total Requests:        %10d                     ║\n", r.TotalRequests)
-	fmt.Printf("║ Successful:            %10d (%.1f%%)              ║\n", r.SuccessfulReqs, float64(r.SuccessfulReqs)/float64(r.TotalRequests)*100)
+	if r.TotalRequests > 0 {
+		fmt.Printf("║ Successful:            %10d (%.1f%%)              ║\n", r.SuccessfulReqs, float64(r.SuccessfulReqs)/float64(r.TotalRequests)*100)
+	} else {
+		fmt.Printf("║ Successful:            %10d (0.0%%)              ║\n", r.SuccessfulReqs)
+	}
 	fmt.Printf("║ Failed:                %10d (%.1f%%)              ║\n", r.FailedReqs, r.ErrorRate)
 	fmt.Printf("║ Duration:              %10s                     ║\n", r.TotalDuration.Round(time.Millisecond))
 	fmt.Printf("║ Requests/sec:          %10.2f                     ║\n", r.RequestsPerSecond)
