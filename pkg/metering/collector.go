@@ -3,6 +3,7 @@ package metering
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 )
@@ -11,16 +12,16 @@ import (
 type UsageCollector interface {
 	// RecordLLMUsage records LLM API usage
 	RecordLLMUsage(ctx context.Context, event LLMUsageEvent) error
-	
+
 	// RecordComputeUsage records compute resource usage
 	RecordComputeUsage(ctx context.Context, event ComputeUsageEvent) error
-	
+
 	// RecordStorageUsage records storage usage
 	RecordStorageUsage(ctx context.Context, event StorageUsageEvent) error
-	
+
 	// GetUsageReport generates a usage report
 	GetUsageReport(ctx context.Context, filters UsageFilters) (*UsageReport, error)
-	
+
 	// GetCostReport generates a cost report
 	GetCostReport(ctx context.Context, filters UsageFilters) (*CostReport, error)
 }
@@ -44,15 +45,15 @@ type LLMUsageEvent struct {
 
 // ComputeUsageEvent represents compute resource usage
 type ComputeUsageEvent struct {
-	Timestamp      time.Time
-	UserID         string
-	WorkspaceID    string
-	ResourceType   string // "mcp-server", "knowledge-ingestion", etc.
-	ResourceID     string
-	CPUSeconds     float64
+	Timestamp       time.Time
+	UserID          string
+	WorkspaceID     string
+	ResourceType    string // "mcp-server", "knowledge-ingestion", etc.
+	ResourceID      string
+	CPUSeconds      float64
 	MemoryGBSeconds float64
-	CostUSD        float64
-	Success        bool
+	CostUSD         float64
+	Success         bool
 }
 
 // StorageUsageEvent represents storage usage
@@ -67,10 +68,10 @@ type StorageUsageEvent struct {
 
 // UsageFilters filters usage queries
 type UsageFilters struct {
-	StartTime   time.Time
-	EndTime     time.Time
-	UserID      string
-	WorkspaceID string
+	StartTime    time.Time
+	EndTime      time.Time
+	UserID       string
+	WorkspaceID  string
 	ResourceType string
 }
 
@@ -94,11 +95,11 @@ type Period struct {
 
 // UserUsage represents usage by a specific user
 type UserUsage struct {
-	UserID       string
+	UserID        string
 	TotalRequests int64
-	TotalTokens  int64
-	TotalCostUSD float64
-	ByModel      map[string]ModelUsage
+	TotalTokens   int64
+	TotalCostUSD  float64
+	ByModel       map[string]ModelUsage
 }
 
 // WorkspaceUsage represents usage by a workspace
@@ -122,25 +123,25 @@ type ModelUsage struct {
 
 // ResourceUsage represents usage by resource type
 type ResourceUsage struct {
-	ResourceType string
-	Count        int64
-	CPUSeconds   float64
+	ResourceType    string
+	Count           int64
+	CPUSeconds      float64
 	MemoryGBSeconds float64
-	StorageBytes int64
-	TotalCostUSD float64
+	StorageBytes    int64
+	TotalCostUSD    float64
 }
 
 // CostReport provides cost breakdown and analysis
 type CostReport struct {
-	Period              Period
-	TotalCostUSD        float64
-	CostByCategory      map[string]float64
-	CostByUser          map[string]float64
-	CostByWorkspace     map[string]float64
-	TopCostDrivers      []CostDriver
-	BudgetAlerts        []BudgetAlert
-	CostTrend           []TrendPoint
-	Recommendations     []CostRecommendation
+	Period          Period
+	TotalCostUSD    float64
+	CostByCategory  map[string]float64
+	CostByUser      map[string]float64
+	CostByWorkspace map[string]float64
+	TopCostDrivers  []CostDriver
+	BudgetAlerts    []BudgetAlert
+	CostTrend       []TrendPoint
+	Recommendations []CostRecommendation
 }
 
 // CostDriver identifies major cost contributors
@@ -153,8 +154,8 @@ type CostDriver struct {
 
 // BudgetAlert represents a budget threshold alert
 type BudgetAlert struct {
-	Severity    string  // "warning", "critical"
-	Message     string
+	Severity     string // "warning", "critical"
+	Message      string
 	CurrentSpend float64
 	BudgetLimit  float64
 	Percentage   float64
@@ -203,11 +204,11 @@ func (c *usageCollector) RecordLLMUsage(ctx context.Context, event LLMUsageEvent
 		}
 		event.CostUSD = cost
 	}
-	
+
 	c.mu.Lock()
 	c.llmEvents = append(c.llmEvents, event)
 	c.mu.Unlock()
-	
+
 	return nil
 }
 
@@ -218,11 +219,11 @@ func (c *usageCollector) RecordComputeUsage(ctx context.Context, event ComputeUs
 		cost := c.calculator.CalculateComputeCost(event.CPUSeconds, event.MemoryGBSeconds)
 		event.CostUSD = cost
 	}
-	
+
 	c.mu.Lock()
 	c.computeEvents = append(c.computeEvents, event)
 	c.mu.Unlock()
-	
+
 	return nil
 }
 
@@ -233,11 +234,11 @@ func (c *usageCollector) RecordStorageUsage(ctx context.Context, event StorageUs
 		cost := c.calculator.CalculateStorageCost(event.Bytes)
 		event.CostUSD = cost
 	}
-	
+
 	c.mu.Lock()
 	c.storageEvents = append(c.storageEvents, event)
 	c.mu.Unlock()
-	
+
 	return nil
 }
 
@@ -245,7 +246,7 @@ func (c *usageCollector) RecordStorageUsage(ctx context.Context, event StorageUs
 func (c *usageCollector) GetUsageReport(ctx context.Context, filters UsageFilters) (*UsageReport, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	
+
 	report := &UsageReport{
 		Period: Period{
 			Start: filters.StartTime,
@@ -256,17 +257,17 @@ func (c *usageCollector) GetUsageReport(ctx context.Context, filters UsageFilter
 		ByModel:        make(map[string]ModelUsage),
 		ByResourceType: make(map[string]ResourceUsage),
 	}
-	
+
 	// Process LLM events
 	for _, event := range c.llmEvents {
 		if !c.matchesFilters(event, filters) {
 			continue
 		}
-		
+
 		report.TotalRequests++
 		report.TotalTokens += event.TotalTokens
 		report.TotalCostUSD += event.CostUSD
-		
+
 		// Aggregate by user
 		if event.UserID != "" {
 			usage := report.ByUser[event.UserID]
@@ -276,7 +277,7 @@ func (c *usageCollector) GetUsageReport(ctx context.Context, filters UsageFilter
 			usage.TotalCostUSD += event.CostUSD
 			report.ByUser[event.UserID] = usage
 		}
-		
+
 		// Aggregate by workspace
 		if event.WorkspaceID != "" {
 			usage := report.ByWorkspace[event.WorkspaceID]
@@ -286,7 +287,7 @@ func (c *usageCollector) GetUsageReport(ctx context.Context, filters UsageFilter
 			usage.TotalCostUSD += event.CostUSD
 			report.ByWorkspace[event.WorkspaceID] = usage
 		}
-		
+
 		// Aggregate by model
 		modelKey := fmt.Sprintf("%s/%s", event.ModelProvider, event.ModelName)
 		usage := report.ByModel[modelKey]
@@ -297,7 +298,7 @@ func (c *usageCollector) GetUsageReport(ctx context.Context, filters UsageFilter
 		usage.TotalCostUSD += event.CostUSD
 		report.ByModel[modelKey] = usage
 	}
-	
+
 	// Process compute events
 	for _, event := range c.computeEvents {
 		if !filters.StartTime.IsZero() && event.Timestamp.Before(filters.StartTime) {
@@ -306,7 +307,7 @@ func (c *usageCollector) GetUsageReport(ctx context.Context, filters UsageFilter
 		if !filters.EndTime.IsZero() && event.Timestamp.After(filters.EndTime) {
 			continue
 		}
-		
+
 		usage := report.ByResourceType[event.ResourceType]
 		usage.ResourceType = event.ResourceType
 		usage.Count++
@@ -314,10 +315,10 @@ func (c *usageCollector) GetUsageReport(ctx context.Context, filters UsageFilter
 		usage.MemoryGBSeconds += event.MemoryGBSeconds
 		usage.TotalCostUSD += event.CostUSD
 		report.ByResourceType[event.ResourceType] = usage
-		
+
 		report.TotalCostUSD += event.CostUSD
 	}
-	
+
 	return report, nil
 }
 
@@ -327,7 +328,7 @@ func (c *usageCollector) GetCostReport(ctx context.Context, filters UsageFilters
 	if err != nil {
 		return nil, err
 	}
-	
+
 	report := &CostReport{
 		Period:          usageReport.Period,
 		TotalCostUSD:    usageReport.TotalCostUSD,
@@ -335,45 +336,45 @@ func (c *usageCollector) GetCostReport(ctx context.Context, filters UsageFilters
 		CostByUser:      make(map[string]float64),
 		CostByWorkspace: make(map[string]float64),
 	}
-	
+
 	// Calculate costs by category
 	report.CostByCategory["LLM"] = 0
 	report.CostByCategory["Compute"] = 0
 	report.CostByCategory["Storage"] = 0
-	
+
 	for _, event := range c.llmEvents {
 		if c.matchesFilters(event, filters) {
 			report.CostByCategory["LLM"] += event.CostUSD
 		}
 	}
-	
+
 	for _, event := range c.computeEvents {
 		if c.matchesComputeFilters(event, filters) {
 			report.CostByCategory["Compute"] += event.CostUSD
 		}
 	}
-	
+
 	for _, event := range c.storageEvents {
 		if c.matchesStorageFilters(event, filters) {
 			report.CostByCategory["Storage"] += event.CostUSD
 		}
 	}
-	
+
 	// Aggregate by user and workspace
 	for userID, usage := range usageReport.ByUser {
 		report.CostByUser[userID] = usage.TotalCostUSD
 	}
-	
+
 	for wsID, usage := range usageReport.ByWorkspace {
 		report.CostByWorkspace[wsID] = usage.TotalCostUSD
 	}
-	
+
 	// Identify top cost drivers
 	report.TopCostDrivers = c.identifyTopCostDrivers(report)
-	
+
 	// Generate recommendations
 	report.Recommendations = c.generateRecommendations(usageReport)
-	
+
 	return report, nil
 }
 
@@ -415,12 +416,16 @@ func (c *usageCollector) matchesStorageFilters(event StorageUsageEvent, filters 
 }
 
 // identifyTopCostDrivers identifies the top cost drivers
+// Uses sort.Slice for O(n log n) performance instead of O(n²) bubble sort
 func (c *usageCollector) identifyTopCostDrivers(report *CostReport) []CostDriver {
 	drivers := []CostDriver{}
-	
+
 	for category, cost := range report.CostByCategory {
 		if cost > 0 {
-			percentage := (cost / report.TotalCostUSD) * 100
+			percentage := 0.0
+			if report.TotalCostUSD > 0 {
+				percentage = (cost / report.TotalCostUSD) * 100
+			}
 			drivers = append(drivers, CostDriver{
 				Category:    category,
 				Description: fmt.Sprintf("%s costs", category),
@@ -429,28 +434,24 @@ func (c *usageCollector) identifyTopCostDrivers(report *CostReport) []CostDriver
 			})
 		}
 	}
-	
-	// Sort by cost (descending)
-	for i := 0; i < len(drivers)-1; i++ {
-		for j := i + 1; j < len(drivers); j++ {
-			if drivers[i].CostUSD < drivers[j].CostUSD {
-				drivers[i], drivers[j] = drivers[j], drivers[i]
-			}
-		}
-	}
-	
+
+	// Sort by cost descending using sort.Slice - O(n log n)
+	sort.Slice(drivers, func(i, j int) bool {
+		return drivers[i].CostUSD > drivers[j].CostUSD
+	})
+
 	// Return top 5
 	if len(drivers) > 5 {
 		drivers = drivers[:5]
 	}
-	
+
 	return drivers
 }
 
 // generateRecommendations generates cost optimization recommendations
 func (c *usageCollector) generateRecommendations(report *UsageReport) []CostRecommendation {
 	recommendations := []CostRecommendation{}
-	
+
 	// Check for expensive models
 	for _, modelUsage := range report.ByModel {
 		if modelUsage.TotalCostUSD > 1000 && modelUsage.RequestCount > 0 {
@@ -465,7 +466,7 @@ func (c *usageCollector) generateRecommendations(report *UsageReport) []CostReco
 			}
 		}
 	}
-	
+
 	// Check for high-usage users
 	for userID, usage := range report.ByUser {
 		if usage.TotalCostUSD > 500 {
@@ -477,6 +478,6 @@ func (c *usageCollector) generateRecommendations(report *UsageReport) []CostReco
 			})
 		}
 	}
-	
+
 	return recommendations
 }
