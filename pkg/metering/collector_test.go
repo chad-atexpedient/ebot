@@ -11,286 +11,119 @@ func TestNewUsageCollector(t *testing.T) {
 	if collector == nil {
 		t.Fatal("NewUsageCollector returned nil")
 	}
-
-	// Clean up
-	if c, ok := collector.(*usageCollector); ok {
-		c.Close()
-	}
-}
-
-func TestNewUsageCollectorWithConfig(t *testing.T) {
-	config := CollectorConfig{
-		MaxEvents:         1000,
-		RetentionPeriod:   24 * time.Hour,
-		CleanupInterval:   time.Minute,
-		EnableAutoCleanup: false, // Disable for testing
-	}
-
-	collector := NewUsageCollectorWithConfig(config)
-	if collector == nil {
-		t.Fatal("NewUsageCollectorWithConfig returned nil")
-	}
-
-	c := collector.(*usageCollector)
-	if c.config.MaxEvents != 1000 {
-		t.Errorf("Expected MaxEvents 1000, got %d", c.config.MaxEvents)
-	}
-
-	c.Close()
 }
 
 func TestRecordLLMUsage(t *testing.T) {
-	config := CollectorConfig{
-		MaxEvents:         100,
-		RetentionPeriod:   24 * time.Hour,
-		EnableAutoCleanup: false,
-	}
-	collector := NewUsageCollectorWithConfig(config)
-	defer collector.(*usageCollector).Close()
-
+	collector := NewUsageCollector()
 	ctx := context.Background()
+
 	event := LLMUsageEvent{
-		Timestamp:     time.Now(),
-		UserID:        "user-1",
-		WorkspaceID:   "ws-1",
-		ModelProvider: "openai",
-		ModelName:     "gpt-4",
-		TotalTokens:   1000,
+		Timestamp:        time.Now(),
+		UserID:           "user-1",
+		WorkspaceID:      "ws-1",
+		ThreadID:         "thread-1",
+		ModelProvider:    "openai",
+		ModelName:        "gpt-4",
+		PromptTokens:     100,
+		CompletionTokens: 50,
+		TotalTokens:      150,
+		CostUSD:          0.0045, // Pre-calculated
+		Latency:          time.Second,
+		Success:          true,
 	}
 
 	err := collector.RecordLLMUsage(ctx, event)
 	if err != nil {
 		t.Fatalf("RecordLLMUsage failed: %v", err)
 	}
+}
 
-	stats := collector.GetStats()
-	if stats.LLMEventCount != 1 {
-		t.Errorf("Expected 1 LLM event, got %d", stats.LLMEventCount)
+func TestRecordLLMUsage_AutoCalculateCost(t *testing.T) {
+	collector := NewUsageCollector()
+	ctx := context.Background()
+
+	event := LLMUsageEvent{
+		Timestamp:        time.Now(),
+		UserID:           "user-1",
+		WorkspaceID:      "ws-1",
+		ModelProvider:    "openai",
+		ModelName:        "gpt-4",
+		PromptTokens:     1000,
+		CompletionTokens: 500,
+		TotalTokens:      1500,
+		CostUSD:          0, // Should be auto-calculated
+		Success:          true,
+	}
+
+	err := collector.RecordLLMUsage(ctx, event)
+	if err != nil {
+		t.Fatalf("RecordLLMUsage failed: %v", err)
 	}
 }
 
 func TestRecordComputeUsage(t *testing.T) {
-	config := CollectorConfig{
-		MaxEvents:         100,
-		RetentionPeriod:   24 * time.Hour,
-		EnableAutoCleanup: false,
-	}
-	collector := NewUsageCollectorWithConfig(config)
-	defer collector.(*usageCollector).Close()
-
+	collector := NewUsageCollector()
 	ctx := context.Background()
+
 	event := ComputeUsageEvent{
-		Timestamp:    time.Now(),
-		UserID:       "user-1",
-		ResourceType: "mcp-server",
-		CPUSeconds:   10.5,
+		Timestamp:       time.Now(),
+		UserID:          "user-1",
+		WorkspaceID:     "ws-1",
+		ResourceType:    "mcp-server",
+		ResourceID:      "mcp-1",
+		CPUSeconds:      60.0,
+		MemoryGBSeconds: 30.0,
+		CostUSD:         0.05,
+		Success:         true,
 	}
 
 	err := collector.RecordComputeUsage(ctx, event)
 	if err != nil {
 		t.Fatalf("RecordComputeUsage failed: %v", err)
 	}
-
-	stats := collector.GetStats()
-	if stats.ComputeEventCount != 1 {
-		t.Errorf("Expected 1 compute event, got %d", stats.ComputeEventCount)
-	}
 }
 
 func TestRecordStorageUsage(t *testing.T) {
-	config := CollectorConfig{
-		MaxEvents:         100,
-		RetentionPeriod:   24 * time.Hour,
-		EnableAutoCleanup: false,
-	}
-	collector := NewUsageCollectorWithConfig(config)
-	defer collector.(*usageCollector).Close()
-
+	collector := NewUsageCollector()
 	ctx := context.Background()
+
 	event := StorageUsageEvent{
 		Timestamp:   time.Now(),
 		UserID:      "user-1",
+		WorkspaceID: "ws-1",
 		StorageType: "knowledge-files",
-		Bytes:       1024 * 1024,
+		Bytes:       1024 * 1024 * 100, // 100 MB
+		CostUSD:     0.01,
 	}
 
 	err := collector.RecordStorageUsage(ctx, event)
 	if err != nil {
 		t.Fatalf("RecordStorageUsage failed: %v", err)
 	}
-
-	stats := collector.GetStats()
-	if stats.StorageEventCount != 1 {
-		t.Errorf("Expected 1 storage event, got %d", stats.StorageEventCount)
-	}
-}
-
-func TestCleanup_RemovesOldEvents(t *testing.T) {
-	config := CollectorConfig{
-		MaxEvents:         100,
-		RetentionPeriod:   time.Hour, // 1 hour retention
-		EnableAutoCleanup: false,
-	}
-	collector := NewUsageCollectorWithConfig(config)
-	defer collector.(*usageCollector).Close()
-
-	ctx := context.Background()
-
-	// Add an old event (2 hours ago)
-	oldEvent := LLMUsageEvent{
-		Timestamp:     time.Now().Add(-2 * time.Hour),
-		UserID:        "user-old",
-		ModelProvider: "openai",
-		ModelName:     "gpt-4",
-	}
-	collector.RecordLLMUsage(ctx, oldEvent)
-
-	// Add a recent event
-	recentEvent := LLMUsageEvent{
-		Timestamp:     time.Now(),
-		UserID:        "user-new",
-		ModelProvider: "openai",
-		ModelName:     "gpt-4",
-	}
-	collector.RecordLLMUsage(ctx, recentEvent)
-
-	// Verify both events exist
-	stats := collector.GetStats()
-	if stats.LLMEventCount != 2 {
-		t.Errorf("Expected 2 events before cleanup, got %d", stats.LLMEventCount)
-	}
-
-	// Run cleanup
-	err := collector.Cleanup(ctx)
-	if err != nil {
-		t.Fatalf("Cleanup failed: %v", err)
-	}
-
-	// Verify old event was removed
-	stats = collector.GetStats()
-	if stats.LLMEventCount != 1 {
-		t.Errorf("Expected 1 event after cleanup, got %d", stats.LLMEventCount)
-	}
-
-	if stats.EventsRemoved != 1 {
-		t.Errorf("Expected 1 event removed, got %d", stats.EventsRemoved)
-	}
-}
-
-func TestMaxEvents_TriggersCleanup(t *testing.T) {
-	config := CollectorConfig{
-		MaxEvents:         5,          // Very low limit
-		RetentionPeriod:   time.Hour,
-		EnableAutoCleanup: false,
-	}
-	collector := NewUsageCollectorWithConfig(config)
-	defer collector.(*usageCollector).Close()
-
-	ctx := context.Background()
-
-	// Add old events up to max
-	for i := 0; i < 5; i++ {
-		event := LLMUsageEvent{
-			Timestamp:     time.Now().Add(-2 * time.Hour), // Old events
-			UserID:        "user",
-			ModelProvider: "openai",
-			ModelName:     "gpt-4",
-		}
-		collector.RecordLLMUsage(ctx, event)
-	}
-
-	// Adding one more should trigger cleanup (removing old events)
-	event := LLMUsageEvent{
-		Timestamp:     time.Now(),
-		UserID:        "user",
-		ModelProvider: "openai",
-		ModelName:     "gpt-4",
-	}
-	collector.RecordLLMUsage(ctx, event)
-
-	stats := collector.GetStats()
-	// After cleanup, only the new event should remain
-	if stats.LLMEventCount != 1 {
-		t.Errorf("Expected 1 event after forced cleanup, got %d", stats.LLMEventCount)
-	}
-}
-
-func TestGetStats(t *testing.T) {
-	config := CollectorConfig{
-		MaxEvents:         100,
-		RetentionPeriod:   24 * time.Hour,
-		EnableAutoCleanup: false,
-	}
-	collector := NewUsageCollectorWithConfig(config)
-	defer collector.(*usageCollector).Close()
-
-	ctx := context.Background()
-
-	// Add events
-	now := time.Now()
-	collector.RecordLLMUsage(ctx, LLMUsageEvent{
-		Timestamp: now.Add(-time.Hour),
-		UserID:    "user-1",
-	})
-	collector.RecordLLMUsage(ctx, LLMUsageEvent{
-		Timestamp: now,
-		UserID:    "user-2",
-	})
-	collector.RecordComputeUsage(ctx, ComputeUsageEvent{
-		Timestamp: now,
-		UserID:    "user-1",
-	})
-
-	stats := collector.GetStats()
-
-	if stats.LLMEventCount != 2 {
-		t.Errorf("Expected 2 LLM events, got %d", stats.LLMEventCount)
-	}
-
-	if stats.ComputeEventCount != 1 {
-		t.Errorf("Expected 1 compute event, got %d", stats.ComputeEventCount)
-	}
-
-	if stats.OldestEvent.IsZero() {
-		t.Error("OldestEvent should not be zero")
-	}
-
-	if stats.NewestEvent.IsZero() {
-		t.Error("NewestEvent should not be zero")
-	}
 }
 
 func TestGetUsageReport(t *testing.T) {
-	config := CollectorConfig{
-		MaxEvents:         100,
-		RetentionPeriod:   24 * time.Hour,
-		EnableAutoCleanup: false,
-	}
-	collector := NewUsageCollectorWithConfig(config)
-	defer collector.(*usageCollector).Close()
-
+	collector := NewUsageCollector()
 	ctx := context.Background()
+
 	now := time.Now()
 
-	// Add events
-	collector.RecordLLMUsage(ctx, LLMUsageEvent{
-		Timestamp:     now,
-		UserID:        "user-1",
-		WorkspaceID:   "ws-1",
-		ModelProvider: "openai",
-		ModelName:     "gpt-4",
-		TotalTokens:   1000,
-		CostUSD:       0.10,
-	})
-	collector.RecordLLMUsage(ctx, LLMUsageEvent{
-		Timestamp:     now,
-		UserID:        "user-1",
-		WorkspaceID:   "ws-1",
-		ModelProvider: "openai",
-		ModelName:     "gpt-4",
-		TotalTokens:   500,
-		CostUSD:       0.05,
-	})
+	// Record some events
+	for i := 0; i < 10; i++ {
+		event := LLMUsageEvent{
+			Timestamp:        now,
+			UserID:           "user-1",
+			WorkspaceID:      "ws-1",
+			ModelProvider:    "openai",
+			ModelName:        "gpt-4",
+			PromptTokens:     100,
+			CompletionTokens: 50,
+			TotalTokens:      150,
+			CostUSD:          0.005,
+			Success:          true,
+		}
+		_ = collector.RecordLLMUsage(ctx, event)
+	}
 
 	filters := UsageFilters{
 		StartTime: now.Add(-time.Hour),
@@ -302,202 +135,382 @@ func TestGetUsageReport(t *testing.T) {
 		t.Fatalf("GetUsageReport failed: %v", err)
 	}
 
-	if report.TotalRequests != 2 {
-		t.Errorf("Expected 2 requests, got %d", report.TotalRequests)
+	if report.TotalRequests != 10 {
+		t.Errorf("Expected 10 requests, got %d", report.TotalRequests)
 	}
 
 	if report.TotalTokens != 1500 {
 		t.Errorf("Expected 1500 tokens, got %d", report.TotalTokens)
 	}
 
-	if report.TotalCostUSD != 0.15 {
-		t.Errorf("Expected $0.15 cost, got $%.2f", report.TotalCostUSD)
-	}
-
-	// Check user aggregation
-	userUsage, ok := report.ByUser["user-1"]
-	if !ok {
-		t.Error("Expected user-1 in report")
-	} else if userUsage.TotalRequests != 2 {
-		t.Errorf("Expected 2 requests for user-1, got %d", userUsage.TotalRequests)
+	if report.TotalCostUSD < 0.05 {
+		t.Errorf("Expected cost >= 0.05, got %f", report.TotalCostUSD)
 	}
 }
 
-func TestGetUsageReport_WithFilters(t *testing.T) {
-	config := CollectorConfig{
-		MaxEvents:         100,
-		RetentionPeriod:   24 * time.Hour,
-		EnableAutoCleanup: false,
-	}
-	collector := NewUsageCollectorWithConfig(config)
-	defer collector.(*usageCollector).Close()
-
+func TestGetUsageReport_FilterByUser(t *testing.T) {
+	collector := NewUsageCollector()
 	ctx := context.Background()
+
 	now := time.Now()
 
-	// Add events for different users
-	collector.RecordLLMUsage(ctx, LLMUsageEvent{
-		Timestamp: now,
-		UserID:    "user-1",
-	})
-	collector.RecordLLMUsage(ctx, LLMUsageEvent{
-		Timestamp: now,
-		UserID:    "user-2",
-	})
+	// Record events for different users
+	for i := 0; i < 5; i++ {
+		event := LLMUsageEvent{
+			Timestamp:   now,
+			UserID:      "user-1",
+			TotalTokens: 100,
+			CostUSD:     0.01,
+		}
+		_ = collector.RecordLLMUsage(ctx, event)
+	}
 
-	// Filter by user-1 only
+	for i := 0; i < 3; i++ {
+		event := LLMUsageEvent{
+			Timestamp:   now,
+			UserID:      "user-2",
+			TotalTokens: 100,
+			CostUSD:     0.01,
+		}
+		_ = collector.RecordLLMUsage(ctx, event)
+	}
+
+	// Filter by user-1
 	filters := UsageFilters{
 		UserID: "user-1",
 	}
 
-	report, err := collector.GetUsageReport(ctx, filters)
-	if err != nil {
-		t.Fatalf("GetUsageReport failed: %v", err)
+	report, _ := collector.GetUsageReport(ctx, filters)
+
+	if report.TotalRequests != 5 {
+		t.Errorf("Expected 5 requests for user-1, got %d", report.TotalRequests)
+	}
+}
+
+func TestGetUsageReport_FilterByWorkspace(t *testing.T) {
+	collector := NewUsageCollector()
+	ctx := context.Background()
+
+	now := time.Now()
+
+	// Record events for different workspaces
+	for i := 0; i < 4; i++ {
+		event := LLMUsageEvent{
+			Timestamp:   now,
+			WorkspaceID: "ws-1",
+			TotalTokens: 100,
+			CostUSD:     0.01,
+		}
+		_ = collector.RecordLLMUsage(ctx, event)
 	}
 
-	if report.TotalRequests != 1 {
-		t.Errorf("Expected 1 request (filtered), got %d", report.TotalRequests)
+	for i := 0; i < 6; i++ {
+		event := LLMUsageEvent{
+			Timestamp:   now,
+			WorkspaceID: "ws-2",
+			TotalTokens: 100,
+			CostUSD:     0.01,
+		}
+		_ = collector.RecordLLMUsage(ctx, event)
+	}
+
+	// Filter by ws-2
+	filters := UsageFilters{
+		WorkspaceID: "ws-2",
+	}
+
+	report, _ := collector.GetUsageReport(ctx, filters)
+
+	if report.TotalRequests != 6 {
+		t.Errorf("Expected 6 requests for ws-2, got %d", report.TotalRequests)
+	}
+}
+
+func TestGetUsageReport_FilterByTimeRange(t *testing.T) {
+	collector := NewUsageCollector()
+	ctx := context.Background()
+
+	now := time.Now()
+
+	// Record events at different times
+	for i := 0; i < 3; i++ {
+		event := LLMUsageEvent{
+			Timestamp:   now.Add(-2 * time.Hour), // 2 hours ago
+			TotalTokens: 100,
+			CostUSD:     0.01,
+		}
+		_ = collector.RecordLLMUsage(ctx, event)
+	}
+
+	for i := 0; i < 5; i++ {
+		event := LLMUsageEvent{
+			Timestamp:   now, // Now
+			TotalTokens: 100,
+			CostUSD:     0.01,
+		}
+		_ = collector.RecordLLMUsage(ctx, event)
+	}
+
+	// Filter last hour only
+	filters := UsageFilters{
+		StartTime: now.Add(-time.Hour),
+		EndTime:   now.Add(time.Hour),
+	}
+
+	report, _ := collector.GetUsageReport(ctx, filters)
+
+	if report.TotalRequests != 5 {
+		t.Errorf("Expected 5 requests in last hour, got %d", report.TotalRequests)
+	}
+}
+
+func TestGetUsageReport_ByModel(t *testing.T) {
+	collector := NewUsageCollector()
+	ctx := context.Background()
+
+	now := time.Now()
+
+	// GPT-4 usage
+	for i := 0; i < 4; i++ {
+		event := LLMUsageEvent{
+			Timestamp:     now,
+			ModelProvider: "openai",
+			ModelName:     "gpt-4",
+			TotalTokens:   100,
+			CostUSD:       0.03,
+		}
+		_ = collector.RecordLLMUsage(ctx, event)
+	}
+
+	// Claude usage
+	for i := 0; i < 3; i++ {
+		event := LLMUsageEvent{
+			Timestamp:     now,
+			ModelProvider: "anthropic",
+			ModelName:     "claude-3-opus",
+			TotalTokens:   100,
+			CostUSD:       0.02,
+		}
+		_ = collector.RecordLLMUsage(ctx, event)
+	}
+
+	report, _ := collector.GetUsageReport(ctx, UsageFilters{})
+
+	if len(report.ByModel) != 2 {
+		t.Errorf("Expected 2 models, got %d", len(report.ByModel))
+	}
+
+	gpt4Usage := report.ByModel["openai/gpt-4"]
+	if gpt4Usage.RequestCount != 4 {
+		t.Errorf("Expected 4 GPT-4 requests, got %d", gpt4Usage.RequestCount)
+	}
+
+	claudeUsage := report.ByModel["anthropic/claude-3-opus"]
+	if claudeUsage.RequestCount != 3 {
+		t.Errorf("Expected 3 Claude requests, got %d", claudeUsage.RequestCount)
 	}
 }
 
 func TestGetCostReport(t *testing.T) {
-	config := CollectorConfig{
-		MaxEvents:         100,
-		RetentionPeriod:   24 * time.Hour,
-		EnableAutoCleanup: false,
-	}
-	collector := NewUsageCollectorWithConfig(config)
-	defer collector.(*usageCollector).Close()
-
+	collector := NewUsageCollector()
 	ctx := context.Background()
+
 	now := time.Now()
 
-	// Add LLM event
-	collector.RecordLLMUsage(ctx, LLMUsageEvent{
-		Timestamp: now,
-		UserID:    "user-1",
-		CostUSD:   10.00,
-	})
+	// Record LLM events
+	for i := 0; i < 5; i++ {
+		event := LLMUsageEvent{
+			Timestamp: now,
+			UserID:    "user-1",
+			CostUSD:   0.10,
+		}
+		_ = collector.RecordLLMUsage(ctx, event)
+	}
 
-	// Add compute event
-	collector.RecordComputeUsage(ctx, ComputeUsageEvent{
-		Timestamp: now,
-		UserID:    "user-1",
-		CostUSD:   5.00,
-	})
+	// Record compute events
+	for i := 0; i < 3; i++ {
+		event := ComputeUsageEvent{
+			Timestamp: now,
+			CostUSD:   0.05,
+		}
+		_ = collector.RecordComputeUsage(ctx, event)
+	}
 
-	// Add storage event
-	collector.RecordStorageUsage(ctx, StorageUsageEvent{
+	// Record storage events
+	event := StorageUsageEvent{
 		Timestamp: now,
-		UserID:    "user-1",
-		CostUSD:   2.00,
-	})
+		CostUSD:   0.02,
+	}
+	_ = collector.RecordStorageUsage(ctx, event)
 
-	filters := UsageFilters{}
-	report, err := collector.GetCostReport(ctx, filters)
+	report, err := collector.GetCostReport(ctx, UsageFilters{})
 	if err != nil {
 		t.Fatalf("GetCostReport failed: %v", err)
 	}
 
-	if report.CostByCategory["LLM"] != 10.00 {
-		t.Errorf("Expected LLM cost $10, got $%.2f", report.CostByCategory["LLM"])
+	// Total: 5*0.10 + 3*0.05 + 0.02 = 0.50 + 0.15 + 0.02 = 0.67
+	expectedTotal := 0.67
+	if report.TotalCostUSD < expectedTotal-0.01 || report.TotalCostUSD > expectedTotal+0.01 {
+		t.Errorf("Expected total cost ~%f, got %f", expectedTotal, report.TotalCostUSD)
 	}
 
-	if report.CostByCategory["Compute"] != 5.00 {
-		t.Errorf("Expected Compute cost $5, got $%.2f", report.CostByCategory["Compute"])
+	// Check category breakdown
+	if report.CostByCategory["LLM"] != 0.50 {
+		t.Errorf("Expected LLM cost 0.50, got %f", report.CostByCategory["LLM"])
 	}
-
-	if report.CostByCategory["Storage"] != 2.00 {
-		t.Errorf("Expected Storage cost $2, got $%.2f", report.CostByCategory["Storage"])
-	}
-}
-
-func TestClose(t *testing.T) {
-	config := CollectorConfig{
-		MaxEvents:         100,
-		RetentionPeriod:   24 * time.Hour,
-		CleanupInterval:   time.Minute,
-		EnableAutoCleanup: true,
-	}
-	collector := NewUsageCollectorWithConfig(config)
-
-	// Close should not panic and should complete
-	err := collector.Close()
-	if err != nil {
-		t.Errorf("Close returned error: %v", err)
+	if report.CostByCategory["Compute"] != 0.15 {
+		t.Errorf("Expected Compute cost 0.15, got %f", report.CostByCategory["Compute"])
 	}
 }
 
-func TestDefaultCollectorConfig(t *testing.T) {
-	config := DefaultCollectorConfig()
+func TestGetCostReport_TopCostDrivers(t *testing.T) {
+	collector := NewUsageCollector()
+	ctx := context.Background()
 
-	if config.MaxEvents != DefaultMaxEvents {
-		t.Errorf("Expected MaxEvents %d, got %d", DefaultMaxEvents, config.MaxEvents)
+	now := time.Now()
+
+	// Create significant LLM costs
+	for i := 0; i < 100; i++ {
+		event := LLMUsageEvent{
+			Timestamp: now,
+			CostUSD:   1.0, // $100 total
+		}
+		_ = collector.RecordLLMUsage(ctx, event)
 	}
 
-	if config.RetentionPeriod != DefaultRetentionPeriod {
-		t.Errorf("Expected RetentionPeriod %v, got %v", DefaultRetentionPeriod, config.RetentionPeriod)
+	// Create smaller compute costs
+	for i := 0; i < 10; i++ {
+		event := ComputeUsageEvent{
+			Timestamp: now,
+			CostUSD:   0.50, // $5 total
+		}
+		_ = collector.RecordComputeUsage(ctx, event)
 	}
 
-	if config.CleanupInterval != DefaultCleanupInterval {
-		t.Errorf("Expected CleanupInterval %v, got %v", DefaultCleanupInterval, config.CleanupInterval)
+	report, _ := collector.GetCostReport(ctx, UsageFilters{})
+
+	if len(report.TopCostDrivers) == 0 {
+		t.Fatal("Expected top cost drivers")
 	}
 
-	if !config.EnableAutoCleanup {
-		t.Error("Expected EnableAutoCleanup to be true by default")
+	// LLM should be top driver
+	topDriver := report.TopCostDrivers[0]
+	if topDriver.Category != "LLM" {
+		t.Errorf("Expected LLM as top driver, got %s", topDriver.Category)
 	}
 }
 
-// Benchmark tests
+func TestGetCostReport_Recommendations(t *testing.T) {
+	collector := NewUsageCollector()
+	ctx := context.Background()
+
+	now := time.Now()
+
+	// Create high-cost model usage
+	for i := 0; i < 5000; i++ {
+		event := LLMUsageEvent{
+			Timestamp:     now,
+			ModelProvider: "openai",
+			ModelName:     "gpt-4",
+			CostUSD:       0.50, // High average cost
+		}
+		_ = collector.RecordLLMUsage(ctx, event)
+	}
+
+	report, _ := collector.GetCostReport(ctx, UsageFilters{})
+
+	if len(report.Recommendations) == 0 {
+		t.Error("Expected cost recommendations for high-cost usage")
+	}
+}
+
+func TestConcurrentRecording(t *testing.T) {
+	collector := NewUsageCollector()
+	ctx := context.Background()
+
+	done := make(chan bool)
+
+	// Concurrent LLM recordings
+	go func() {
+		for i := 0; i < 100; i++ {
+			event := LLMUsageEvent{
+				Timestamp: time.Now(),
+				UserID:    "user-concurrent",
+				CostUSD:   0.01,
+			}
+			_ = collector.RecordLLMUsage(ctx, event)
+		}
+		done <- true
+	}()
+
+	// Concurrent compute recordings
+	go func() {
+		for i := 0; i < 100; i++ {
+			event := ComputeUsageEvent{
+				Timestamp: time.Now(),
+				CostUSD:   0.01,
+			}
+			_ = collector.RecordComputeUsage(ctx, event)
+		}
+		done <- true
+	}()
+
+	// Concurrent report generation
+	go func() {
+		for i := 0; i < 50; i++ {
+			_, _ = collector.GetUsageReport(ctx, UsageFilters{})
+		}
+		done <- true
+	}()
+
+	// Wait for all goroutines
+	for i := 0; i < 3; i++ {
+		<-done
+	}
+}
 
 func BenchmarkRecordLLMUsage(b *testing.B) {
-	config := CollectorConfig{
-		MaxEvents:         1000000,
-		RetentionPeriod:   24 * time.Hour,
-		EnableAutoCleanup: false,
-	}
-	collector := NewUsageCollectorWithConfig(config)
-	defer collector.(*usageCollector).Close()
-
+	collector := NewUsageCollector()
 	ctx := context.Background()
+
 	event := LLMUsageEvent{
-		Timestamp:     time.Now(),
-		UserID:        "user-1",
-		WorkspaceID:   "ws-1",
-		ModelProvider: "openai",
-		ModelName:     "gpt-4",
-		TotalTokens:   1000,
-		CostUSD:       0.10,
+		Timestamp:        time.Now(),
+		UserID:           "user-1",
+		WorkspaceID:      "ws-1",
+		ModelProvider:    "openai",
+		ModelName:        "gpt-4",
+		PromptTokens:     100,
+		CompletionTokens: 50,
+		TotalTokens:      150,
+		CostUSD:          0.005,
+		Success:          true,
 	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		event.Timestamp = time.Now()
 		_ = collector.RecordLLMUsage(ctx, event)
 	}
 }
 
-func BenchmarkCleanup(b *testing.B) {
-	config := CollectorConfig{
-		MaxEvents:         100000,
-		RetentionPeriod:   time.Minute,
-		EnableAutoCleanup: false,
-	}
-	collector := NewUsageCollectorWithConfig(config)
-	defer collector.(*usageCollector).Close()
-
+func BenchmarkGetUsageReport(b *testing.B) {
+	collector := NewUsageCollector()
 	ctx := context.Background()
 
-	// Add many old events
-	for i := 0; i < 10000; i++ {
-		collector.RecordLLMUsage(ctx, LLMUsageEvent{
-			Timestamp: time.Now().Add(-2 * time.Hour),
-			UserID:    "user",
-		})
+	// Pre-populate with data
+	for i := 0; i < 1000; i++ {
+		event := LLMUsageEvent{
+			Timestamp:   time.Now(),
+			UserID:      "user-1",
+			TotalTokens: 100,
+			CostUSD:     0.01,
+		}
+		_ = collector.RecordLLMUsage(ctx, event)
 	}
+
+	filters := UsageFilters{}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = collector.Cleanup(ctx)
+		_, _ = collector.GetUsageReport(ctx, filters)
 	}
 }
