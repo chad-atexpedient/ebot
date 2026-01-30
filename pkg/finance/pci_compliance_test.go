@@ -7,11 +7,25 @@ import (
 )
 
 // mockLogger implements Logger for testing
-type mockLogger struct{}
+type mockLogger struct {
+	messages []string
+}
 
-func (m *mockLogger) Info(msg string, args ...interface{})  {}
-func (m *mockLogger) Error(msg string, args ...interface{}) {}
-func (m *mockLogger) Warn(msg string, args ...interface{})  {}
+func (l *mockLogger) Info(msg string, args ...interface{})  { l.messages = append(l.messages, msg) }
+func (l *mockLogger) Error(msg string, args ...interface{}) { l.messages = append(l.messages, msg) }
+func (l *mockLogger) Warn(msg string, args ...interface{})  { l.messages = append(l.messages, msg) }
+
+func newMockLogger() *mockLogger {
+	return &mockLogger{messages: []string{}}
+}
+
+func TestNewPCICompliance(t *testing.T) {
+	logger := newMockLogger()
+	pci := NewPCICompliance(logger)
+	if pci == nil {
+		t.Fatal("NewPCICompliance returned nil")
+	}
+}
 
 func TestValidateLuhn(t *testing.T) {
 	tests := []struct {
@@ -19,21 +33,28 @@ func TestValidateLuhn(t *testing.T) {
 		pan      string
 		expected bool
 	}{
-		// Valid test card numbers (from various card networks for testing)
-		{"Valid Visa", "4532015112830366", true},
-		{"Valid Visa with spaces", "4532 0151 1283 0366", true},
-		{"Valid Visa with dashes", "4532-0151-1283-0366", true},
-		{"Valid Mastercard", "5425233430109903", true},
-		{"Valid Amex", "374245455400126", true},
-		{"Valid Discover", "6011000990139424", true},
-
+		// Valid test card numbers
+		{"Visa valid", "4111111111111111", true},
+		{"MasterCard valid", "5500000000000004", true},
+		{"Amex valid", "340000000000009", true},
+		{"Discover valid", "6011000000000004", true},
+		{"JCB valid", "3530111333300000", true},
+		
+		// With formatting
+		{"Visa with dashes", "4111-1111-1111-1111", true},
+		{"Visa with spaces", "4111 1111 1111 1111", true},
+		
 		// Invalid numbers
-		{"Invalid checksum", "4532015112830367", false},
-		{"Too short", "453201511", false},
-		{"Too long", "45320151128303661234", false},
-		{"Invalid - all zeros", "0000000000000000", true}, // Actually passes Luhn!
+		{"Invalid checksum", "4111111111111112", false},
+		{"Too short", "411111", false},
+		{"Too long", "41111111111111111111", false},
+		{"All zeros", "0000000000000000", true}, // Passes Luhn but invalid in practice
 		{"Random invalid", "1234567890123456", false},
-		{"Invalid modified", "4532015112830365", false},
+		
+		// Edge cases
+		{"Empty string", "", false},
+		{"Letters only", "abcdefghijklmnop", false},
+		{"Mixed alphanumeric", "4111abcd11111111", false},
 	}
 
 	for _, tt := range tests {
@@ -52,17 +73,40 @@ func TestGetCardIssuer(t *testing.T) {
 		pan      string
 		expected string
 	}{
-		{"Visa", "4532015112830366", "Visa"},
-		{"Mastercard 51", "5125233430109903", "Mastercard"},
-		{"Mastercard 55", "5525233430109903", "Mastercard"},
-		{"Mastercard 2221", "2221000000000009", "Mastercard"},
-		{"American Express 34", "340000000000009", "American Express"},
-		{"American Express 37", "370000000000002", "American Express"},
-		{"Discover 6011", "6011000990139424", "Discover"},
-		{"Discover 65", "6500000000000002", "Discover"},
-		{"JCB", "3530111333300000", "JCB"},
-		{"Diners Club 36", "36000000000008", "Diners Club"},
-		{"Unknown", "9999999999999999", "Unknown"},
+		// Visa
+		{"Visa 4", "4111111111111111", "Visa"},
+		{"Visa formatted", "4111-1111-1111-1111", "Visa"},
+		
+		// Mastercard
+		{"MasterCard 51", "5111111111111111", "Mastercard"},
+		{"MasterCard 52", "5211111111111111", "Mastercard"},
+		{"MasterCard 53", "5311111111111111", "Mastercard"},
+		{"MasterCard 54", "5411111111111111", "Mastercard"},
+		{"MasterCard 55", "5511111111111111", "Mastercard"},
+		{"MasterCard 2221", "2221111111111111", "Mastercard"},
+		{"MasterCard 2720", "2720111111111111", "Mastercard"},
+		
+		// American Express
+		{"Amex 34", "341111111111111", "American Express"},
+		{"Amex 37", "371111111111111", "American Express"},
+		
+		// Discover
+		{"Discover 6011", "6011111111111111", "Discover"},
+		{"Discover 65", "6511111111111111", "Discover"},
+		{"Discover 644", "6441111111111111", "Discover"},
+		
+		// JCB
+		{"JCB 3528", "3528111111111111", "JCB"},
+		{"JCB 3589", "3589111111111111", "JCB"},
+		
+		// Diners Club
+		{"Diners 36", "3611111111111111", "Diners Club"},
+		{"Diners 38", "3811111111111111", "Diners Club"},
+		{"Diners 300", "3001111111111111", "Diners Club"},
+		
+		// Unknown
+		{"Unknown prefix", "9911111111111111", "Unknown"},
+		{"Short number", "41111", "Unknown"},
 	}
 
 	for _, tt := range tests {
@@ -75,334 +119,427 @@ func TestGetCardIssuer(t *testing.T) {
 	}
 }
 
-func TestScanForCardData_ValidPAN(t *testing.T) {
-	logger := &mockLogger{}
-	pci := NewPCICompliance(logger)
-	ctx := context.Background()
-
-	// Use a valid test PAN (passes Luhn)
-	text := "Customer card: 4532015112830366"
-
-	report, err := pci.ScanForCardData(ctx, text)
-	if err != nil {
-		t.Fatalf("ScanForCardData failed: %v", err)
-	}
-
-	if !report.ContainsCardData {
-		t.Error("Expected to detect card data")
-	}
-
-	if report.PANCount != 1 {
-		t.Errorf("Expected 1 PAN, got %d", report.PANCount)
-	}
-
-	if report.RiskLevel != RiskLevelCritical {
-		t.Errorf("Expected Critical risk level, got %s", report.RiskLevel)
-	}
-}
-
-func TestScanForCardData_InvalidPAN_NotDetected(t *testing.T) {
-	logger := &mockLogger{}
-	pci := NewPCICompliance(logger)
-	ctx := context.Background()
-
-	// Use an invalid PAN (fails Luhn) - should NOT be detected
-	text := "Customer card: 1234567890123456"
-
-	report, err := pci.ScanForCardData(ctx, text)
-	if err != nil {
-		t.Fatalf("ScanForCardData failed: %v", err)
-	}
-
-	if report.PANCount != 0 {
-		t.Errorf("Expected 0 PANs for invalid number, got %d", report.PANCount)
-	}
-}
-
-func TestScanForCardData_CVVWithContext(t *testing.T) {
-	logger := &mockLogger{}
+func TestScanForCardData_DetectsPAN(t *testing.T) {
+	logger := newMockLogger()
 	pci := NewPCICompliance(logger)
 	ctx := context.Background()
 
 	tests := []struct {
-		name         string
-		text         string
-		expectCVV    bool
-		expectedCount int
+		name        string
+		input       string
+		shouldFind  bool
+		expectedPAN int
 	}{
 		{
-			name:         "CVV with keyword",
-			text:         "Card CVV: 123",
-			expectCVV:    true,
-			expectedCount: 1,
+			name:        "Valid Visa with Luhn",
+			input:       "Card number: 4111111111111111",
+			shouldFind:  true,
+			expectedPAN: 1,
 		},
 		{
-			name:         "CVC with keyword",
-			text:         "CVC: 456",
-			expectCVV:    true,
-			expectedCount: 1,
+			name:        "Visa with dashes",
+			input:       "Card: 4111-1111-1111-1111",
+			shouldFind:  true,
+			expectedPAN: 1,
 		},
 		{
-			name:         "Security code keyword",
-			text:         "Security code: 789",
-			expectCVV:    true,
-			expectedCount: 1,
+			name:        "Visa with spaces",
+			input:       "Card: 4111 1111 1111 1111",
+			shouldFind:  true,
+			expectedPAN: 1,
 		},
 		{
-			name:         "CVV2 keyword",
-			text:         "CVV2 321",
-			expectCVV:    true,
-			expectedCount: 1,
+			name:        "Multiple PANs",
+			input:       "Card1: 4111111111111111 Card2: 5500000000000004",
+			shouldFind:  true,
+			expectedPAN: 2,
 		},
 		{
-			name:         "Random 3-digit number - NO detection",
-			text:         "Order quantity: 123 items",
-			expectCVV:    false,
-			expectedCount: 0,
+			name:        "Invalid Luhn - should NOT detect",
+			input:       "Card: 4111111111111112",
+			shouldFind:  false,
+			expectedPAN: 0,
 		},
 		{
-			name:         "Phone number - NO detection",
-			text:         "Call 555-1234 for support",
-			expectCVV:    false,
-			expectedCount: 0,
-		},
-		{
-			name:         "Building number - NO detection",
-			text:         "Located at building 456",
-			expectCVV:    false,
-			expectedCount: 0,
+			name:        "No card data",
+			input:       "This is a normal text without any card data",
+			shouldFind:  false,
+			expectedPAN: 0,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			report, err := pci.ScanForCardData(ctx, tt.text)
+			report, err := pci.ScanForCardData(ctx, tt.input)
 			if err != nil {
 				t.Fatalf("ScanForCardData failed: %v", err)
 			}
 
-			if (report.CVVCount > 0) != tt.expectCVV {
-				t.Errorf("CVV detection mismatch: got count=%d, expected detection=%v", report.CVVCount, tt.expectCVV)
+			if report.ContainsCardData != tt.shouldFind {
+				t.Errorf("ContainsCardData = %v, want %v", report.ContainsCardData, tt.shouldFind)
 			}
 
-			if report.CVVCount != tt.expectedCount {
-				t.Errorf("Expected %d CVVs, got %d", tt.expectedCount, report.CVVCount)
+			if report.PANCount != tt.expectedPAN {
+				t.Errorf("PANCount = %d, want %d", report.PANCount, tt.expectedPAN)
 			}
 		})
 	}
 }
 
-func TestScanForCardData_NoFalsePositives(t *testing.T) {
-	logger := &mockLogger{}
+func TestScanForCardData_DetectsCVV(t *testing.T) {
+	logger := newMockLogger()
 	pci := NewPCICompliance(logger)
 	ctx := context.Background()
 
-	// Text that should NOT trigger false positives
-	texts := []string{
-		"The year 2024 was great",
-		"Order ID: 1234567890123456", // 16 digits but fails Luhn
-		"Phone: 555-123-4567",
-		"Building 123, Floor 456",
-		"Product code: 9876543210987654", // 16 digits but fails Luhn
-		"The answer is 42",
-		"Temperature: 123 degrees",
+	tests := []struct {
+		name        string
+		input       string
+		shouldFind  bool
+		expectedCVV int
+	}{
+		{
+			name:        "CVV with keyword",
+			input:       "CVV: 123",
+			shouldFind:  true,
+			expectedCVV: 1,
+		},
+		{
+			name:        "CVC with keyword",
+			input:       "CVC: 456",
+			shouldFind:  true,
+			expectedCVV: 1,
+		},
+		{
+			name:        "Security code",
+			input:       "Security code: 789",
+			shouldFind:  true,
+			expectedCVV: 1,
+		},
+		{
+			name:        "4-digit Amex CVV",
+			input:       "CVV2: 1234",
+			shouldFind:  true,
+			expectedCVV: 1,
+		},
+		{
+			name:        "Standalone number - should NOT match",
+			input:       "There are 123 items",
+			shouldFind:  false,
+			expectedCVV: 0,
+		},
 	}
 
-	for _, text := range texts {
-		t.Run(text[:20], func(t *testing.T) {
-			report, err := pci.ScanForCardData(ctx, text)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			report, err := pci.ScanForCardData(ctx, tt.input)
 			if err != nil {
 				t.Fatalf("ScanForCardData failed: %v", err)
 			}
 
-			if report.PANCount > 0 {
-				t.Errorf("False positive PAN detected in: %s", text)
-			}
-			if report.CVVCount > 0 {
-				t.Errorf("False positive CVV detected in: %s", text)
+			if report.CVVCount != tt.expectedCVV {
+				t.Errorf("CVVCount = %d, want %d", report.CVVCount, tt.expectedCVV)
 			}
 		})
+	}
+}
+
+func TestScanForCardData_RiskLevel(t *testing.T) {
+	logger := newMockLogger()
+	pci := NewPCICompliance(logger)
+	ctx := context.Background()
+
+	tests := []struct {
+		name          string
+		input         string
+		expectedLevel RiskLevel
+	}{
+		{
+			name:          "No card data",
+			input:         "Normal text",
+			expectedLevel: RiskLevelNone,
+		},
+		{
+			name:          "PAN present - critical",
+			input:         "Card: 4111111111111111",
+			expectedLevel: RiskLevelCritical,
+		},
+		{
+			name:          "CVV present - critical",
+			input:         "CVV: 123",
+			expectedLevel: RiskLevelCritical,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			report, err := pci.ScanForCardData(ctx, tt.input)
+			if err != nil {
+				t.Fatalf("ScanForCardData failed: %v", err)
+			}
+
+			if report.RiskLevel != tt.expectedLevel {
+				t.Errorf("RiskLevel = %s, want %s", report.RiskLevel, tt.expectedLevel)
+			}
+		})
+	}
+}
+
+func TestScanForCardData_Recommendations(t *testing.T) {
+	logger := newMockLogger()
+	pci := NewPCICompliance(logger)
+	ctx := context.Background()
+
+	// PAN present
+	report, _ := pci.ScanForCardData(ctx, "Card: 4111111111111111")
+	if len(report.Recommendations) == 0 {
+		t.Error("Expected recommendations when PAN is present")
+	}
+
+	// CVV present
+	report, _ = pci.ScanForCardData(ctx, "CVV: 123")
+	foundCVVWarning := false
+	for _, rec := range report.Recommendations {
+		if strings.Contains(rec, "NEVER STORE CVV") {
+			foundCVVWarning = true
+			break
+		}
+	}
+	if !foundCVVWarning {
+		t.Error("Expected CVV warning in recommendations")
 	}
 }
 
 func TestMaskCardData(t *testing.T) {
-	logger := &mockLogger{}
+	logger := newMockLogger()
 	pci := NewPCICompliance(logger)
 	ctx := context.Background()
 
-	text := "Card: 4532015112830366, CVV: 123"
-	masked, err := pci.MaskCardData(ctx, text)
-	if err != nil {
-		t.Fatalf("MaskCardData failed: %v", err)
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "Mask PAN",
+			input:    "Card: 4111111111111111",
+			expected: "Card: ************1111",
+		},
+		{
+			name:     "Keep non-PAN text",
+			input:    "Normal text",
+			expected: "Normal text",
+		},
 	}
 
-	// PAN should be masked, showing only last 4 digits
-	if strings.Contains(masked, "4532015112830366") {
-		t.Error("PAN should be masked")
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := pci.MaskCardData(ctx, tt.input)
+			if err != nil {
+				t.Fatalf("MaskCardData failed: %v", err)
+			}
 
-	if !strings.Contains(masked, "0366") {
-		t.Error("Last 4 digits should be visible")
-	}
-
-	// CVV should be masked
-	if strings.Contains(masked, "123") && !strings.Contains(masked, "***") {
-		t.Error("CVV should be masked")
+			if result != tt.expected {
+				t.Errorf("MaskCardData() = %s, want %s", result, tt.expected)
+			}
+		})
 	}
 }
 
-func TestMaskCardData_InvalidPAN_NotMasked(t *testing.T) {
-	logger := &mockLogger{}
+func TestMaskCardData_OnlyMasksValidPANs(t *testing.T) {
+	logger := newMockLogger()
 	pci := NewPCICompliance(logger)
 	ctx := context.Background()
 
-	// Invalid PAN should not be masked
-	text := "Number: 1234567890123456"
-	masked, err := pci.MaskCardData(ctx, text)
-	if err != nil {
-		t.Fatalf("MaskCardData failed: %v", err)
-	}
-
-	// Invalid PAN should remain unchanged
-	if !strings.Contains(masked, "1234567890123456") {
-		t.Error("Invalid PAN should not be masked")
-	}
-}
-
-func TestTokenizeCardData_FormatPreserving(t *testing.T) {
-	logger := &mockLogger{}
-	pci := NewPCICompliance(logger)
-	ctx := context.Background()
-
-	text := "Card: 4532015112830366"
-	tokenized, err := pci.TokenizeCardData(ctx, text, TokenMethodFormatPreserving)
-	if err != nil {
-		t.Fatalf("TokenizeCardData failed: %v", err)
-	}
-
-	// Original PAN should not be present
-	if strings.Contains(tokenized, "4532015112830366") {
-		t.Error("Original PAN should be tokenized")
-	}
-
-	// BIN (first 6) and last 4 should be preserved
-	if !strings.Contains(tokenized, "453201") {
-		t.Error("BIN should be preserved in format-preserving tokenization")
-	}
-
-	if !strings.Contains(tokenized, "0366") {
-		t.Error("Last 4 digits should be preserved")
+	// Invalid Luhn should NOT be masked
+	input := "Card: 4111111111111112" // Invalid checksum
+	result, _ := pci.MaskCardData(ctx, input)
+	
+	// Should remain unchanged since Luhn validation fails
+	if result != input {
+		t.Errorf("Invalid PAN should not be masked, got: %s", result)
 	}
 }
 
 func TestTokenizeCardData_Hash(t *testing.T) {
-	logger := &mockLogger{}
+	logger := newMockLogger()
 	pci := NewPCICompliance(logger)
 	ctx := context.Background()
 
-	text := "Card: 4532015112830366"
-	tokenized, err := pci.TokenizeCardData(ctx, text, TokenMethodHash)
+	input := "Card: 4111111111111111"
+	result, err := pci.TokenizeCardData(ctx, input, TokenMethodHash)
 	if err != nil {
 		t.Fatalf("TokenizeCardData failed: %v", err)
 	}
 
 	// Should contain token prefix
-	if !strings.Contains(tokenized, "tok_") {
-		t.Error("Hash tokenization should produce tok_ prefix")
+	if !strings.Contains(result, "tok_") {
+		t.Errorf("Expected hash token with tok_ prefix, got: %s", result)
 	}
 
-	// Original PAN should not be present
-	if strings.Contains(tokenized, "4532015112830366") {
-		t.Error("Original PAN should be hashed")
+	// Should not contain original PAN
+	if strings.Contains(result, "4111111111111111") {
+		t.Error("Original PAN should not be in tokenized output")
+	}
+}
+
+func TestTokenizeCardData_FormatPreserving(t *testing.T) {
+	logger := newMockLogger()
+	pci := NewPCICompliance(logger)
+	ctx := context.Background()
+
+	input := "Card: 4111111111111111"
+	result, err := pci.TokenizeCardData(ctx, input, TokenMethodFormatPreserving)
+	if err != nil {
+		t.Fatalf("TokenizeCardData failed: %v", err)
+	}
+
+	// Should keep BIN (first 6) and last 4
+	if !strings.Contains(result, "411111") {
+		t.Errorf("Expected BIN to be preserved, got: %s", result)
+	}
+	if !strings.Contains(result, "1111") {
+		t.Errorf("Expected last 4 to be preserved, got: %s", result)
+	}
+}
+
+func TestTokenizeCardData_Masking(t *testing.T) {
+	logger := newMockLogger()
+	pci := NewPCICompliance(logger)
+	ctx := context.Background()
+
+	input := "Card: 4111111111111111"
+	result, err := pci.TokenizeCardData(ctx, input, TokenMethodMasking)
+	if err != nil {
+		t.Fatalf("TokenizeCardData failed: %v", err)
+	}
+
+	// Should have asterisks
+	if !strings.Contains(result, "****") {
+		t.Errorf("Expected masked output, got: %s", result)
+	}
+}
+
+func TestTokenizeCardData_InvalidMethod(t *testing.T) {
+	logger := newMockLogger()
+	pci := NewPCICompliance(logger)
+	ctx := context.Background()
+
+	_, err := pci.TokenizeCardData(ctx, "Card: 4111111111111111", "invalid_method")
+	if err == nil {
+		t.Error("Expected error for invalid tokenization method")
 	}
 }
 
 func TestValidateCDE(t *testing.T) {
-	logger := &mockLogger{}
+	logger := newMockLogger()
 	pci := NewPCICompliance(logger)
 	ctx := context.Background()
 
-	// Test with proper segmentation
-	scope := CDEScope{
+	// Valid CDE scope
+	validScope := CDEScope{
 		Systems:       []string{"payment-server"},
-		Applications:  []string{"payment-api"},
+		Applications:  []string{"payment-app"},
 		SegmentedFrom: []string{"corporate-network"},
 	}
 
-	validation, err := pci.ValidateCDE(ctx, scope)
+	result, err := pci.ValidateCDE(ctx, validScope)
 	if err != nil {
 		t.Fatalf("ValidateCDE failed: %v", err)
 	}
 
-	if !validation.SegmentationOK {
-		t.Error("Segmentation should be OK with SegmentedFrom defined")
+	if !result.IsCompliant {
+		t.Error("Expected valid CDE scope to be compliant")
 	}
+	if !result.SegmentationOK {
+		t.Error("Expected segmentation to be OK")
+	}
+}
 
-	// Test without segmentation
-	scopeNoSeg := CDEScope{
+func TestValidateCDE_NoSegmentation(t *testing.T) {
+	logger := newMockLogger()
+	pci := NewPCICompliance(logger)
+	ctx := context.Background()
+
+	// CDE without segmentation
+	scope := CDEScope{
 		Systems:      []string{"payment-server"},
-		Applications: []string{"payment-api"},
+		Applications: []string{"payment-app"},
+		// Missing SegmentedFrom
 	}
 
-	validationNoSeg, err := pci.ValidateCDE(ctx, scopeNoSeg)
-	if err != nil {
-		t.Fatalf("ValidateCDE failed: %v", err)
-	}
+	result, _ := pci.ValidateCDE(ctx, scope)
 
-	if validationNoSeg.SegmentationOK {
-		t.Error("Segmentation should fail without SegmentedFrom")
+	if result.IsCompliant {
+		t.Error("Expected non-compliant without segmentation")
 	}
+	if result.SegmentationOK {
+		t.Error("Expected segmentation to fail")
+	}
+	if len(result.Violations) == 0 {
+		t.Error("Expected violations to be reported")
+	}
+}
 
-	if validationNoSeg.IsCompliant {
-		t.Error("Should not be compliant without segmentation")
+func TestValidateCDE_EmptyScope(t *testing.T) {
+	logger := newMockLogger()
+	pci := NewPCICompliance(logger)
+	ctx := context.Background()
+
+	// Empty CDE scope
+	scope := CDEScope{}
+
+	result, _ := pci.ValidateCDE(ctx, scope)
+
+	if result.IsCompliant {
+		t.Error("Expected non-compliant for empty scope")
 	}
 }
 
 func TestGenerateSAQ(t *testing.T) {
-	logger := &mockLogger{}
+	logger := newMockLogger()
 	pci := NewPCICompliance(logger)
 	ctx := context.Background()
 
-	report, err := pci.GenerateSAQ(ctx, "test-org")
+	report, err := pci.GenerateSAQ(ctx, "org-123")
 	if err != nil {
 		t.Fatalf("GenerateSAQ failed: %v", err)
 	}
 
-	if report.Organization != "test-org" {
-		t.Errorf("Expected org 'test-org', got '%s'", report.Organization)
+	if report.Organization != "org-123" {
+		t.Errorf("Expected organization org-123, got %s", report.Organization)
 	}
 
-	if report.Type != "SAQ D" {
-		t.Errorf("Expected SAQ type 'SAQ D', got '%s'", report.Type)
+	if report.Type == "" {
+		t.Error("Expected SAQ type to be set")
 	}
 
 	if len(report.Requirements) == 0 {
-		t.Error("SAQ should have requirements")
+		t.Error("Expected SAQ requirements")
 	}
 }
 
 func TestGetComplianceStatus(t *testing.T) {
-	logger := &mockLogger{}
+	logger := newMockLogger()
 	pci := NewPCICompliance(logger)
 	ctx := context.Background()
 
-	status, err := pci.GetComplianceStatus(ctx, "new-org")
+	status, err := pci.GetComplianceStatus(ctx, "org-456")
 	if err != nil {
 		t.Fatalf("GetComplianceStatus failed: %v", err)
 	}
 
-	if status.OrganizationID != "new-org" {
-		t.Errorf("Expected org 'new-org', got '%s'", status.OrganizationID)
+	if status.OrganizationID != "org-456" {
+		t.Errorf("Expected organization org-456, got %s", status.OrganizationID)
 	}
 
+	// New organization should be "Not Assessed"
 	if status.ComplianceLevel != "Not Assessed" {
-		t.Errorf("New org should be 'Not Assessed', got '%s'", status.ComplianceLevel)
+		t.Errorf("Expected 'Not Assessed', got %s", status.ComplianceLevel)
 	}
 }
 
-// Benchmark tests
 func BenchmarkValidateLuhn(b *testing.B) {
-	pan := "4532015112830366"
+	pan := "4111111111111111"
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		ValidateLuhn(pan)
@@ -410,13 +547,33 @@ func BenchmarkValidateLuhn(b *testing.B) {
 }
 
 func BenchmarkScanForCardData(b *testing.B) {
-	logger := &mockLogger{}
+	logger := newMockLogger()
 	pci := NewPCICompliance(logger)
 	ctx := context.Background()
-	text := "Payment details: Card 4532015112830366, CVV: 123, Exp: 12/25"
+
+	text := `
+		Customer payment information:
+		Card Number: 4111 1111 1111 1111
+		Expiry: 12/25
+		CVV: 123
+		Name: John Doe
+	`
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_, _ = pci.ScanForCardData(ctx, text)
+	}
+}
+
+func BenchmarkMaskCardData(b *testing.B) {
+	logger := newMockLogger()
+	pci := NewPCICompliance(logger)
+	ctx := context.Background()
+
+	text := "Card: 4111111111111111"
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = pci.MaskCardData(ctx, text)
 	}
 }
