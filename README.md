@@ -26,6 +26,34 @@ ebot enables you to:
 
 ---
 
+## 🚨 Recent Updates (January 2026)
+
+### Security & CI Hardening Complete
+We've just completed a comprehensive security and CI pipeline hardening initiative based on a thorough repository review:
+
+**✅ P0 Critical Fixes Applied:**
+- **SQL Injection Prevention**: Added strict tenant ID validation with regex patterns to prevent SQL injection in multi-tenancy queries
+- **Parameterized Query Migration**: Enhanced documentation warning against string concatenation, recommending ORM-based queries
+
+**✅ P1 High-Priority Fixes Applied:**
+- **Rate Limit Tests Fixed**: Resolved compilation errors and updated trusted proxy configuration
+- **Dockerfile Hardened**: Removed placeholder binary fallback, builds now properly fail on errors
+- **Healthcheck Improved**: Switched from `wget` to `curl` with proper tool installation
+- **CI Pipeline Hardened**: 
+  - SDK tests (Python & TypeScript) now properly fail on errors (removed `continue-on-error`)
+  - Security scanning pinned to stable versions (Gosec v2.20.0, Trivy 0.24.0)
+  - Security scans now block CI on CRITICAL/HIGH vulnerabilities
+- **Release Workflow Fixed**: Corrected `PREV_TAG` output for accurate changelog generation
+
+**📋 Current Status:**
+- [PR #36](https://github.com/chad-atexpedient/ebot/pull/36) - Security and CI Hardening (Under Review)
+- All P0/P1 security and build issues addressed
+- Enhanced CI enforcement for SDK stability and vulnerability detection
+
+See [ROADMAP.md](ROADMAP.md) for complete development timeline and upcoming features.
+
+---
+
 ## 🚀 Quick Start
 
 ### Docker (Recommended for Development)
@@ -72,6 +100,8 @@ See [docs/gitops-deployment.md](docs/gitops-deployment.md) for complete deployme
 - **SOC 2 Type II**: Comprehensive audit trails and change management
 - **SAML 2.0 SSO**: Azure AD, Okta, Google Workspace integration
 - **ABAC Policies**: Attribute-based access control with CEL expressions
+- **🆕 SQL Injection Protection**: Validated tenant-aware queries with strict input validation
+- **🆕 Hardened CI Pipeline**: Security scanning blocks on CRITICAL/HIGH vulnerabilities
 
 ### 💰 **Cost Management**
 - **Real-Time Tracking**: Monitor costs across 15+ LLM models
@@ -114,12 +144,14 @@ See [docs/gitops-deployment.md](docs/gitops-deployment.md) for complete deployme
 - **White-Labeling**: Custom branding, domains, CSS
 - **Per-Tenant Encryption**: Separate encryption keys per tenant
 - **Resource Quotas**: Configurable limits per tenant
+- **🆕 SQL Injection Prevention**: Validated tenant IDs with safe character sets
 
 ### 🚀 **Performance & Scalability**
 - **10x Faster**: Redis caching with 85% hit rate
 - **Response Compression**: 70% bandwidth reduction (gzip)
 - **Connection Pooling**: Optimized database connections
 - **Load Tested**: Handles 500+ RPS with <20ms latency
+- **🆕 Hardened Build Process**: Docker builds fail properly on compilation errors
 
 ### 🤖 **Advanced AI Features**
 - **Model A/B Testing**: Compare model performance with traffic splitting
@@ -134,6 +166,7 @@ See [docs/gitops-deployment.md](docs/gitops-deployment.md) for complete deployme
 - **Interactive API Docs**: Auto-generated OpenAPI 3.0 specifications
 - **CLI Tool**: Command-line interface for automation
 - **GitOps Ready**: Terraform, Pulumi, ArgoCD support
+- **🆕 Enforced SDK Quality**: CI pipeline blocks on SDK test failures
 
 ---
 
@@ -186,6 +219,16 @@ See [docs/gitops-deployment.md](docs/gitops-deployment.md) for complete deployme
 ✅ CLI tool
 ✅ Terraform modules
 ✅ ArgoCD configurations
+```
+
+### Security Hardening (🆕 January 2026)
+```
+✅ SQL injection prevention in multi-tenancy
+✅ Hardened Docker build process
+✅ Enforced security scanning (blocks on vulnerabilities)
+✅ SDK test enforcement (no silent failures)
+✅ Pinned CI action versions (no @master dependencies)
+✅ Improved healthcheck reliability
 ```
 
 ---
@@ -337,6 +380,8 @@ ebot is designed for enterprise production use:
 - **Authentication**: OAuth 2.1, SAML 2.0
 - **Authorization**: RBAC + ABAC
 - **Audit Logging**: Comprehensive trails
+- **🆕 SQL Injection Prevention**: Validated tenant-scoped queries
+- **🆕 CI Security Gates**: Automated vulnerability blocking
 
 ---
 
@@ -370,6 +415,7 @@ Key differences in ebot:
 - Multi-region deployment
 - Advanced cost management
 - Production-ready SDKs
+- Hardened security and CI pipeline
 
 See [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md) for full credits.
 
@@ -389,6 +435,7 @@ See [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md) for full credits.
 | **Multi-Tenancy** | ✅ 3 Levels | ⚠️ Basic |
 | **SDKs** | ✅ Python + TS | ⚠️ Limited |
 | **Performance** | ✅ 10x Faster | - |
+| **🆕 Security Hardening** | ✅ Enforced | ⚠️ Optional |
 
 ---
 
@@ -410,10 +457,11 @@ ebot follows a structured 4-phase development roadmap:
 - ✅ **Phase 2**: Enterprise scale (Multi-region, access control, SDKs, performance)
 - ✅ **Phase 3**: Industry-specific (HIPAA, PCI-DSS, integrations, security)
 - ✅ **Phase 4**: Advanced features (Model management, prompt tools, RAG, GitOps)
+- 🔄 **Phase 5**: Security & CI Hardening (January 2026 - In Progress)
 
-**Status**: 100% Complete - Production Ready! 🎉
+**Current Status**: Security hardening complete, PR under review. Next up: P2 enhancements and monitoring improvements.
 
-See [ROADMAP.md](ROADMAP.md) for detailed plans.
+See [ROADMAP.md](ROADMAP.md) for detailed plans and upcoming features.
 
 ---
 
