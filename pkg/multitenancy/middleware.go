@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"regexp"
 )
 
 // TenantResolver resolves tenant ID from HTTP requests
@@ -218,7 +219,14 @@ func (r *CompositeResolver) ResolveTenant(req *http.Request) (string, error) {
 	return "", fmt.Errorf("no resolver could extract tenant ID")
 }
 
-// TenantScopedDB provides database queries scoped to tenant
+// tenantIDPattern constrains tenant IDs to safe characters to prevent SQL injection
+var tenantIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// TenantScopedDB provides database queries scoped to tenant.
+//
+// WARNING: ScopeQuery performs string-based query rewriting and is only made
+// safe by strict validation of tenant IDs. New code SHOULD prefer using
+// parameterized queries or database row-level security where possible.
 type TenantScopedDB struct {
 	tenantIDColumn string
 }
@@ -230,16 +238,33 @@ func NewTenantScopedDB() *TenantScopedDB {
 	}
 }
 
-// ScopeQuery adds tenant filter to a query
-// This is a simplified example - real implementation would use your ORM
+// ScopeQuery adds tenant filter to a query.
+//
+// NOTE: This helper is intentionally conservative to avoid SQL injection.
+// - It only allows tenant IDs that match [A-Za-z0-9_-]+
+// - If the tenant ID is invalid, it returns a query that matches no rows.
+//
+// New code SHOULD prefer parameterized queries or database-enforced
+// row-level security instead of string concatenation.
 func (db *TenantScopedDB) ScopeQuery(ctx context.Context, query string) string {
 	tenantID := GetTenantFromContext(ctx)
 	if tenantID == "" {
 		return query
 	}
 
+	// Validate tenant ID to avoid SQL injection
+	if !tenantIDPattern.MatchString(tenantID) {
+		// Invalid tenant ID → ensure no rows are returned instead of leaking data.
+		upper := strings.ToUpper(query)
+		if strings.Contains(upper, "WHERE") {
+			return query + " AND 1=0"
+		}
+		return query + " WHERE 1=0"
+	}
+
 	// Add WHERE clause if not present
-	if strings.Contains(strings.ToUpper(query), "WHERE") {
+	upper := strings.ToUpper(query)
+	if strings.Contains(upper, "WHERE") {
 		return query + fmt.Sprintf(" AND %s = '%s'", db.tenantIDColumn, tenantID)
 	}
 	return query + fmt.Sprintf(" WHERE %s = '%s'", db.tenantIDColumn, tenantID)
