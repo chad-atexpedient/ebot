@@ -1,6 +1,6 @@
 module github.com/chad-atexpedient/ebot
 
-go 1.25.5
+go 1.22
 
 replace (
 	github.com/chad-atexpedient/ebot/apiclient => ./apiclient
@@ -76,6 +76,8 @@ require (
 	k8s.io/kube-openapi v0.0.0-20241009091222-67ed5848f094
 	sigs.k8s.io/controller-runtime v0.19.0
 	sigs.k8s.io/yaml v1.6.0
+	github.com/google/cel-go v0.20.1
+	google.golang.org/genproto/googleapis/api v0.0.0-20250218202821-56aae31c358a
 )
 
 require (
@@ -179,7 +181,6 @@ require (
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
-	github.com/google/cel-go v0.20.1 // indirect
 	github.com/google/gnostic-models v0.6.8 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/gofuzz v1.2.0 // indirect
@@ -300,7 +301,6 @@ require (
 	golang.org/x/time v0.11.0 // indirect
 	golang.org/x/tools v0.39.0 // indirect
 	google.golang.org/genproto v0.0.0-20240903143218-8af14fe29dc1 // indirect
-	google.golang.org/genproto/googleapis/api v0.0.0-20250218202821-56aae31c358a // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250218202821-56aae31c358a // indirect
 	google.golang.org/grpc v1.71.0 // indirect
 	google.golang.org/protobuf v1.36.6 // indirect
