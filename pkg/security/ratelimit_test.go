@@ -2,6 +2,7 @@ package security
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -37,8 +38,6 @@ func (m *mockCacheManager) Delete(ctx context.Context, key string) error {
 	delete(m.data, key)
 	return nil
 }
-
-import "fmt"
 
 func TestNewRateLimiter(t *testing.T) {
 	cache := newMockCacheManager()
@@ -130,8 +129,11 @@ func TestGetClientIP_RemoteAddr(t *testing.T) {
 func TestGetClientIP_TrustedProxy(t *testing.T) {
 	cache := newMockCacheManager()
 	config := DefaultRateLimitConfig()
-	config.TrustedProxyCIDRs = []string{"10.0.0.0/8"}
+	config.TrustedProxies = []string{"10.0.0.0/8"}
 	rl := NewRateLimiter(config, cache)
+	
+	// Explicitly enable trusting X-Forwarded-For from trusted proxies
+	rl.EnableXForwardedForTrust(true)
 	
 	req := httptest.NewRequest("GET", "/api/test", nil)
 	req.RemoteAddr = "10.0.0.1:54321"
