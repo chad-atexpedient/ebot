@@ -1,6 +1,7 @@
 package security
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 )
@@ -11,10 +12,10 @@ type SecurityHeadersConfig struct {
 	CSP CSPConfig
 
 	// Strict-Transport-Security
-	EnableHSTS       bool
-	HSTSMaxAge       int  // seconds
+	EnableHSTS            bool
+	HSTSMaxAge            int // seconds
 	HSTSIncludeSubdomains bool
-	HSTSPreload      bool
+	HSTSPreload           bool
 
 	// X-Frame-Options
 	FrameOptions string // DENY, SAMEORIGIN, or ALLOW-FROM uri
@@ -42,64 +43,64 @@ type CSPConfig struct {
 	Enable bool
 
 	// Directives
-	DefaultSrc       []string
-	ScriptSrc        []string
-	StyleSrc         []string
-	ImgSrc           []string
-	FontSrc          []string
-	ConnectSrc       []string
-	FrameSrc         []string
-	ObjectSrc        []string
-	MediaSrc         []string
-	WorkerSrc        []string
-	ChildSrc         []string
-	FrameAncestors   []string
-	BaseURI          []string
-	FormAction       []string
+	DefaultSrc              []string
+	ScriptSrc               []string
+	StyleSrc                []string
+	ImgSrc                  []string
+	FontSrc                 []string
+	ConnectSrc              []string
+	FrameSrc                []string
+	ObjectSrc               []string
+	MediaSrc                []string
+	WorkerSrc               []string
+	ChildSrc                []string
+	FrameAncestors          []string
+	BaseURI                 []string
+	FormAction              []string
 	UpgradeInsecureRequests bool
 	BlockAllMixedContent    bool
-	ReportURI        string
-	ReportTo         string
+	ReportURI               string
+	ReportTo                string
 }
 
 // DefaultSecurityHeaders returns secure default configuration
 func DefaultSecurityHeaders() *SecurityHeadersConfig {
 	return &SecurityHeadersConfig{
 		CSP: CSPConfig{
-			Enable:       true,
-			DefaultSrc:   []string{"'self'"},
-			ScriptSrc:    []string{"'self'", "'unsafe-inline'", "'unsafe-eval'"}, // Adjust based on needs
-			StyleSrc:     []string{"'self'", "'unsafe-inline'"},
-			ImgSrc:       []string{"'self'", "data:", "https:"},
-			FontSrc:      []string{"'self'", "data:"},
-			ConnectSrc:   []string{"'self'"},
-			FrameSrc:     []string{"'self'"},
-			ObjectSrc:    []string{"'none'"},
-			MediaSrc:     []string{"'self'"},
-			WorkerSrc:    []string{"'self'"},
-			FrameAncestors: []string{"'self'"},
-			BaseURI:      []string{"'self'"},
-			FormAction:   []string{"'self'"},
+			Enable:                  true,
+			DefaultSrc:              []string{"'self'"},
+			ScriptSrc:               []string{"'self'", "'unsafe-inline'", "'unsafe-eval'"}, // Adjust based on needs
+			StyleSrc:                []string{"'self'", "'unsafe-inline'"},
+			ImgSrc:                  []string{"'self'", "data:", "https:"},
+			FontSrc:                 []string{"'self'", "data:"},
+			ConnectSrc:              []string{"'self'"},
+			FrameSrc:                []string{"'self'"},
+			ObjectSrc:               []string{"'none'"},
+			MediaSrc:                []string{"'self'"},
+			WorkerSrc:               []string{"'self'"},
+			FrameAncestors:          []string{"'self'"},
+			BaseURI:                 []string{"'self'"},
+			FormAction:              []string{"'self'"},
 			UpgradeInsecureRequests: true,
 			BlockAllMixedContent:    true,
 		},
-		EnableHSTS:              true,
-		HSTSMaxAge:              31536000, // 1 year
-		HSTSIncludeSubdomains:   true,
-		HSTSPreload:             true,
-		FrameOptions:            "DENY",
-		EnableNoSniff:           true,
-		EnableXSSProtection:     true,
-		ReferrerPolicy:          "strict-origin-when-cross-origin",
+		EnableHSTS:            true,
+		HSTSMaxAge:            31536000, // 1 year
+		HSTSIncludeSubdomains: true,
+		HSTSPreload:           true,
+		FrameOptions:          "DENY",
+		EnableNoSniff:         true,
+		EnableXSSProtection:   true,
+		ReferrerPolicy:        "strict-origin-when-cross-origin",
 		PermissionsPolicy: map[string][]string{
-			"camera":         {},
-			"microphone":     {},
-			"geolocation":    {},
-			"payment":        {},
-			"usb":            {},
-			"magnetometer":   {},
-			"gyroscope":      {},
-			"accelerometer":  {},
+			"camera":        {},
+			"microphone":    {},
+			"geolocation":   {},
+			"payment":       {},
+			"usb":           {},
+			"magnetometer":  {},
+			"gyroscope":     {},
+			"accelerometer": {},
 		},
 		CrossOriginOpenerPolicy:   "same-origin",
 		CrossOriginResourcePolicy: "same-origin",
@@ -236,9 +237,11 @@ func buildCSP(config *CSPConfig) string {
 }
 
 // buildHSTS builds Strict-Transport-Security header value
+// FIX: Previously used string(rune(int)) which corrupts the max-age value.
+// Now correctly uses fmt.Sprintf for integer-to-string conversion.
 func buildHSTS(config *SecurityHeadersConfig) string {
-	hsts := "max-age=" + string(rune(config.HSTSMaxAge))
-	
+	hsts := fmt.Sprintf("max-age=%d", config.HSTSMaxAge)
+
 	if config.HSTSIncludeSubdomains {
 		hsts += "; includeSubDomains"
 	}
@@ -267,24 +270,24 @@ func buildPermissionsPolicy(policy map[string][]string) string {
 // ProductionSecurityHeaders returns strict production configuration
 func ProductionSecurityHeaders() *SecurityHeadersConfig {
 	config := DefaultSecurityHeaders()
-	
+
 	// Stricter CSP for production
 	config.CSP.ScriptSrc = []string{"'self'"} // Remove unsafe-inline, unsafe-eval
 	config.CSP.StyleSrc = []string{"'self'"}
-	
+
 	return config
 }
 
 // DevelopmentSecurityHeaders returns relaxed configuration for development
 func DevelopmentSecurityHeaders() *SecurityHeadersConfig {
 	config := DefaultSecurityHeaders()
-	
+
 	// Relaxed for dev
 	config.EnableHSTS = false
 	config.CSP.ScriptSrc = []string{"'self'", "'unsafe-inline'", "'unsafe-eval'"}
 	config.CSP.StyleSrc = []string{"'self'", "'unsafe-inline'"}
 	config.CrossOriginOpenerPolicy = "unsafe-none"
 	config.CrossOriginEmbedderPolicy = "unsafe-none"
-	
+
 	return config
 }
