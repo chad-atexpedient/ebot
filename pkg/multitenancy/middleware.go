@@ -4,8 +4,28 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 )
+
+// validTenantIDPattern restricts tenant IDs to safe characters only.
+// This prevents SQL injection when tenant IDs are used in query scoping.
+var validTenantIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,62}[A-Za-z0-9]$`)
+
+// ValidateTenantID checks whether a tenant ID contains only safe characters.
+// Returns an error if the tenant ID could be used for injection attacks.
+func ValidateTenantID(tenantID string) error {
+	if tenantID == "" {
+		return fmt.Errorf("tenant ID cannot be empty")
+	}
+	if len(tenantID) > 64 {
+		return fmt.Errorf("tenant ID exceeds maximum length of 64 characters")
+	}
+	if !validTenantIDPattern.MatchString(tenantID) {
+		return fmt.Errorf("tenant ID contains invalid characters (allowed: alphanumeric, hyphens, underscores)")
+	}
+	return nil
+}
 
 // TenantResolver resolves tenant ID from HTTP requests
 type TenantResolver interface {
@@ -49,6 +69,12 @@ func (m *TenantMiddleware) Middleware(next http.Handler) http.Handler {
 		tenantID, err := m.resolver.ResolveTenant(r)
 		if err != nil {
 			http.Error(w, "Tenant not found", http.StatusNotFound)
+			return
+		}
+
+		// Validate tenant ID format before any further processing
+		if err := ValidateTenantID(tenantID); err != nil {
+			http.Error(w, "Invalid tenant identifier", http.StatusBadRequest)
 			return
 		}
 
@@ -119,7 +145,6 @@ func (r *SubdomainResolver) ResolveTenant(req *http.Request) (string, error) {
 
 	// Check if it's a subdomain of base domain
 	if !strings.HasSuffix(host, "."+r.baseDomain) {
-		// Check for custom domain
 		return "", fmt.Errorf("invalid domain: %s", host)
 	}
 
@@ -178,9 +203,6 @@ func NewJWTResolver(claimName string) *JWTResolver {
 
 // ResolveTenant extracts tenant from JWT
 func (r *JWTResolver) ResolveTenant(req *http.Request) (string, error) {
-	// This would integrate with your JWT validation
-	// For now, check for a pre-extracted claim in context
-
 	if claims := req.Context().Value("jwt_claims"); claims != nil {
 		if claimsMap, ok := claims.(map[string]interface{}); ok {
 			if tenantID, ok := claimsMap[r.claimName].(string); ok {
@@ -230,12 +252,28 @@ func NewTenantScopedDB() *TenantScopedDB {
 	}
 }
 
-// ScopeQuery adds tenant filter to a query
-// This is a simplified example - real implementation would use your ORM
+// ScopeQuery adds tenant filter to a query using validated tenant IDs.
+//
+// SECURITY: The tenant ID is validated against a strict regex pattern before
+// being interpolated into the query. However, callers SHOULD prefer using
+// parameterized queries via ScopeQueryParams() whenever possible.
+//
+// WARNING: This method uses string interpolation for backward compatibility.
+// For new code, use ScopeQueryParams() which returns the query and parameters
+// separately for use with parameterized database drivers.
 func (db *TenantScopedDB) ScopeQuery(ctx context.Context, query string) string {
 	tenantID := GetTenantFromContext(ctx)
 	if tenantID == "" {
 		return query
+	}
+
+	// Validate tenant ID to prevent SQL injection.
+	// If validation fails, return a query that matches nothing rather than
+	// risking injection. This is a defense-in-depth measure — the middleware
+	// should have already validated the tenant ID before it reaches context.
+	if err := ValidateTenantID(tenantID); err != nil {
+		// Return a query guaranteed to return no rows
+		return "SELECT NULL WHERE 1=0"
 	}
 
 	// Add WHERE clause if not present
@@ -243,6 +281,29 @@ func (db *TenantScopedDB) ScopeQuery(ctx context.Context, query string) string {
 		return query + fmt.Sprintf(" AND %s = '%s'", db.tenantIDColumn, tenantID)
 	}
 	return query + fmt.Sprintf(" WHERE %s = '%s'", db.tenantIDColumn, tenantID)
+}
+
+// ScopeQueryParams returns a parameterized query and args for safe tenant scoping.
+// This is the PREFERRED method for tenant-scoped queries as it uses parameterized
+// queries that are immune to SQL injection regardless of input validation.
+//
+// Usage:
+//
+//	query, args := scopedDB.ScopeQueryParams(ctx, "SELECT * FROM resources", existingArgs)
+//	rows, err := db.QueryContext(ctx, query, args...)
+func (db *TenantScopedDB) ScopeQueryParams(ctx context.Context, query string, args []interface{}) (string, []interface{}) {
+	tenantID := GetTenantFromContext(ctx)
+	if tenantID == "" {
+		return query, args
+	}
+
+	paramIndex := len(args) + 1
+	args = append(args, tenantID)
+
+	if strings.Contains(strings.ToUpper(query), "WHERE") {
+		return query + fmt.Sprintf(" AND %s = $%d", db.tenantIDColumn, paramIndex), args
+	}
+	return query + fmt.Sprintf(" WHERE %s = $%d", db.tenantIDColumn, paramIndex), args
 }
 
 // GetTenantFilter returns a filter map for the current tenant
