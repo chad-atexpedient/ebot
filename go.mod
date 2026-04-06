@@ -11,7 +11,7 @@ require (
 	github.com/chad-atexpedient/ebot/logger v0.0.0-00010101000000-000000000000
 	github.com/google/cel-go v0.20.1
 	github.com/jackc/pgx/v5 v5.7.5
-	github.com/mattn/go-sqlite3 v1.14.15
+	github.com/mattn/go-sqlite3 v1.14.40
 	github.com/redis/go-redis/v9 v9.17.3
 	golang.org/x/crypto v0.47.0
 	google.golang.org/genproto/googleapis/api v0.0.0-20250218202821-56aae31c358a
