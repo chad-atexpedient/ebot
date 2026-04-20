@@ -10,7 +10,7 @@ replace (
 require (
 	github.com/chad-atexpedient/ebot/logger v0.0.0-00010101000000-000000000000
 	github.com/google/cel-go v0.20.1
-	github.com/jackc/pgx/v5 v5.7.5
+	github.com/jackc/pgx/v5 v5.9.2
 	github.com/mattn/go-sqlite3 v1.14.15
 	github.com/redis/go-redis/v9 v9.17.3
 	golang.org/x/crypto v0.47.0
@@ -22,7 +22,6 @@ require (
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/rogpeppe/go-internal v1.14.1 // indirect
-	github.com/stretchr/testify v1.11.1 // indirect
 	golang.org/x/exp v0.0.0-20250813145105-42675adae3e6 // indirect
 	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/text v0.33.0 // indirect
